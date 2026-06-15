@@ -82,6 +82,13 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // — Inicializar logger global al arrancar (aplica a todos los subcomandos) —
+    if let Some(log_path) = logger::get_log_path() {
+        // Solo mostrar la ruta si estamos en modo verbose/debug
+        // En modo normal, el log es silencioso para no contaminar la salida
+        let _ = log_path; // silenciar warning de unused
+    }
+
     match cli.command {
         // Sin subcomando → TUI interactiva
         None | Some(Commands::Tui) => {
