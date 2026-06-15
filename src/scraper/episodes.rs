@@ -17,7 +17,9 @@ use regex::Regex;
 use std::sync::OnceLock;
 
 use crate::config::BASE_URL;
+use crate::logger;
 use crate::scraper::client::build_client;
+use crate::security;
 use crate::structs::{Anime, AnimeCategory, Episode};
 
 // ————————————————————————————————————————————————
@@ -117,9 +119,14 @@ fn get_re_mal_id() -> &'static Regex {
 /// println!("{} tiene {} episodios", anime.title, episodes.len());
 /// ```
 pub async fn get_episodes(anime: &mut Anime) -> Result<Vec<Episode>> {
+    // SEGURIDAD: validar el slug antes de construir la URL
+    security::validate_anime_slug(&anime.slug)
+        .map_err(|e| anyhow::anyhow!("Slug inválido: {}", e))?;
+
     let client = build_client().context("Error al inicializar cliente HTTP")?;
 
     let url = format!("{}/media/{}", BASE_URL, anime.slug);
+    logger::log_net("GET", &url, "solicitando episodios...");
 
     let html = client
         .get(&url)
@@ -153,9 +160,14 @@ pub async fn get_episodes(anime: &mut Anime) -> Result<Vec<Episode>> {
 /// # Retorna
 /// Tupla con los episodios y los metadatos del anime.
 pub async fn get_episodes_by_slug(slug: &str) -> Result<(Vec<Episode>, AnimeMetadata)> {
+    // SEGURIDAD: validar el slug antes de construir la URL
+    security::validate_anime_slug(slug)
+        .map_err(|e| anyhow::anyhow!("Slug inválido: {}", e))?;
+
     let client = build_client().context("Error al inicializar cliente HTTP")?;
 
     let url = format!("{}/media/{}", BASE_URL, slug);
+    logger::log_net("GET", &url, "solicitando episodios por slug...");
 
     let html = client
         .get(&url)

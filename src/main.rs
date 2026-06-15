@@ -13,8 +13,11 @@
 
 mod app;
 mod config;
+mod logger;
 mod player;
+mod resolver;
 mod scraper;
+mod security;
 mod structs;
 mod ui;
 
@@ -117,6 +120,12 @@ async fn run_tui() -> Result<()> {
     use std::io;
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    // — Inicializar logger (primero de todo) —
+    // El logger registra todos los eventos internos a ~/.local/share/ani-tui/logs/
+    if let Some(log_path) = logger::get_log_path() {
+        eprintln!("[ani-tui] Logs en: {}", log_path.display());
+    }
 
     // — Configurar terminal —
     enable_raw_mode()?;
@@ -485,25 +494,34 @@ fn handle_sources_input(app: &mut App, code: KeyCode) {
                 app.toggle_audio();
             }
         }
-        // Reproducir la fuente seleccionada
+        // Reproducir la fuente seleccionada (async: resolver URL + mpv/browser)
         KeyCode::Enter => {
-            let sources = app.sources.get(&app.selected_audio);
+            let sources = app.sources.get(&app.selected_audio).to_vec();
             if let Some(idx) = app.sources_state.selected() {
                 if let Some(source) = sources.get(idx).cloned() {
+                    // Usar la versión que resuelve la URL primero
                     let result = player::play_source(&source);
                     match result {
-                        player::PlayResult::LaunchedMpv => {
-                            // mpv lanzado en background, la TUI sigue activa
+                        player::PlayResult::LaunchedMpv { ref url } => {
+                            logger::log_info("tui", &format!("mpv lanzado: {}", &url[..url.len().min(50)]));
                         }
-                        player::PlayResult::LaunchedBrowser => {
-                            // Navegador abierto
+                        player::PlayResult::LaunchedBrowser { .. } => {
+                            logger::log_info("tui", "Navegador abierto");
                         }
                         player::PlayResult::NoSources => {
                             app.set_error("No hay fuentes disponibles".to_string());
                         }
-                        player::PlayResult::Error(e) => {
+                        player::PlayResult::Error(ref e) => {
                             app.set_error(format!("Error al reproducir: {}", e));
                         }
+                    }
+                    // Mostrar mensaje de estado en la TUI
+                    let msg = result.display_message();
+                    // El mensaje se muestra brevemente como info (no error)
+                    if matches!(result, player::PlayResult::Error(_) | player::PlayResult::NoSources) {
+                        // error ya establecido arriba
+                    } else {
+                        app.error_message = Some(msg); // reutilizar para mensaje de info
                     }
                 }
             }
