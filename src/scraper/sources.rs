@@ -21,7 +21,9 @@ use regex::Regex;
 use std::sync::OnceLock;
 
 use crate::config::BASE_URL;
+use crate::logger;
 use crate::scraper::client::build_client;
+use crate::security;
 use crate::structs::{AudioType, EpisodeSources, VideoSource};
 
 // ————————————————————————————————————————————————
@@ -104,9 +106,16 @@ pub async fn get_video_sources(
     anime_slug: &str,
     episode_number: u32,
 ) -> Result<EpisodeSources> {
+    // SEGURIDAD: validar slug y número de episodio antes de construir la URL
+    security::validate_anime_slug(anime_slug)
+        .map_err(|e| anyhow::anyhow!("Slug inválido: {}", e))?;
+    security::validate_episode_number(episode_number)
+        .map_err(|e| anyhow::anyhow!("Número de episodio inválido: {}", e))?;
+
     let client = build_client().context("Error al inicializar cliente HTTP")?;
 
     let url = format!("{}/media/{}/{}", BASE_URL, anime_slug, episode_number);
+    logger::log_net("GET", &url, "solicitando fuentes de video...");
 
     let html = client
         .get(&url)
