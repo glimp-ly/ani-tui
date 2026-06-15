@@ -1,0 +1,60 @@
+# Maintainer: glimp <glimp.ly@gmail.com>
+# AUR package: ani-tui-git
+# Siempre construye desde el último commit de la rama main.
+# Para la versión estable, ver: https://aur.archlinux.org/packages/ani-tui
+
+pkgname=ani-tui-git
+pkgver=r9.4034cde
+pkgrel=1
+pkgdesc="TUI interactiva para buscar y reproducir anime desde animeav1.com sin anuncios (git)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/glimp-ly/ani-tui"
+license=('GPL3')
+depends=('gcc-libs')
+makedepends=('cargo' 'git')
+optdepends=(
+    'mpv: reproducción directa de video sin anuncios (recomendado)'
+    'xdg-utils: abrir URLs en el navegador del sistema'
+)
+provides=("ani-tui")
+conflicts=("ani-tui")
+source=("${pkgname}::git+https://github.com/glimp-ly/ani-tui.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$pkgname"
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd "$pkgname"
+    # Pre-descargar dependencias de Cargo para compilación offline
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --all-features
+}
+
+check() {
+    cd "$pkgname"
+    # Verificar que el binario existe y responde
+    ./target/release/ani-tui --help > /dev/null
+}
+
+package() {
+    cd "$pkgname"
+
+    # Binario principal
+    install -Dm755 "target/release/ani-tui" "${pkgdir}/usr/bin/ani-tui"
+
+    # Licencia
+    install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+
+    # README
+    install -Dm644 "README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+}

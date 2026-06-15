@@ -1,0 +1,53 @@
+# Maintainer: glimp <glimp.ly@gmail.com>
+# AUR package: ani-tui
+# Versión estable, compilada desde el tarball de GitHub releases.
+# Para la última versión de desarrollo, ver: https://aur.archlinux.org/packages/ani-tui-git
+
+pkgname=ani-tui
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="TUI interactiva para buscar y reproducir anime desde animeav1.com sin anuncios"
+arch=('x86_64' 'aarch64')
+url="https://github.com/glimp-ly/ani-tui"
+license=('GPL3')
+depends=('gcc-libs')
+makedepends=('cargo')
+optdepends=(
+    'mpv: reproducción directa de video sin anuncios (recomendado)'
+    'xdg-utils: abrir URLs en el navegador del sistema'
+)
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/glimp-ly/ani-tui/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('PLACEHOLDER_SHA256_UPDATE_AFTER_PUSH_TAG')
+# Para actualizar el sha256:
+#   curl -sL https://github.com/glimp-ly/ani-tui/archive/refs/tags/v0.2.0.tar.gz | sha256sum
+
+prepare() {
+    cd "${pkgname}-${pkgver}"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "${pkgname}-${pkgver}"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --all-features
+}
+
+check() {
+    cd "${pkgname}-${pkgver}"
+    ./target/release/ani-tui --help > /dev/null
+}
+
+package() {
+    cd "${pkgname}-${pkgver}"
+
+    # Binario principal
+    install -Dm755 "target/release/ani-tui" "${pkgdir}/usr/bin/ani-tui"
+
+    # Licencia
+    install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+
+    # README
+    install -Dm644 "README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+}
