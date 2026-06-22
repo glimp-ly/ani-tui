@@ -3,6 +3,7 @@
 # Uso:
 #   ./install.sh            -> compilar e instalar desde el repo local
 #   ./install.sh --release  -> descargar e instalar el binario del ultimo release de GitHub
+#   ./install.sh --remove   -> desinstalar el binario del sistema
 #   ./install.sh --help     -> mostrar ayuda
 
 set -euo pipefail
@@ -44,6 +45,7 @@ Uso: $0 [OPCION]
 Opciones:
   (sin args)   Compilar e instalar desde el repo local usando Cargo
   --release    Descargar e instalar el binario del ultimo GitHub release
+  --remove     Desinstalar el binario del sistema
   --help       Mostrar esta ayuda
 
 Destino de instalacion: ${INSTALL_DIR}
@@ -226,6 +228,41 @@ install_from_release() {
     "${INSTALL_DIR}/${BINARY}" --version 2>/dev/null || true
 }
 
+# ==============================================================
+# MODO 3: Desinstalar el binario del sistema
+# ==============================================================
+uninstall() {
+    info "Desinstalando ${BINARY}..."
+
+    # Buscar el binario: primero en INSTALL_DIR, luego en el PATH completo
+    local target=""
+    if [ -f "${INSTALL_DIR}/${BINARY}" ]; then
+        target="${INSTALL_DIR}/${BINARY}"
+    elif command -v "$BINARY" &>/dev/null; then
+        target=$(command -v "$BINARY")
+    fi
+
+    if [ -z "$target" ]; then
+        die "${BINARY} no esta instalado en este sistema (no se encontro en PATH ni en ${INSTALL_DIR})."
+    fi
+
+    step "Encontrado en: ${target}"
+
+    # Eliminar con o sin sudo segun permisos sobre el archivo
+    if [ -w "$target" ]; then
+        rm "$target" || die "El script fallo al intentar eliminar ${target}."
+    else
+        sudo rm "$target" || die "El script fallo al intentar eliminar ${target} con sudo."
+    fi
+
+    # Verificar que realmente fue eliminado
+    if [ -f "$target" ]; then
+        die "El script fallo: ${target} sigue existiendo tras intentar eliminarlo."
+    fi
+
+    info "OK: ${BINARY} eliminado de ${target}"
+}
+
 # --- Aviso sobre dependencias opcionales -----------------------
 check_optional_deps() {
     command -v mpv &>/dev/null \
@@ -243,6 +280,9 @@ main() {
         --release)
             install_from_release
             check_optional_deps
+            ;;
+        --remove)
+            uninstall
             ;;
         "")
             install_from_source
