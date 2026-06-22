@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# install.sh — Instalador de ani-tui
+# install.sh - Instalador de ani-tui
 # Uso:
-#   ./install.sh            → compilar e instalar desde el repo local
-#   ./install.sh --release  → descargar e instalar el binario del último release de GitHub
-#   ./install.sh --help     → mostrar ayuda
+#   ./install.sh            -> compilar e instalar desde el repo local
+#   ./install.sh --release  -> descargar e instalar el binario del ultimo release de GitHub
+#   ./install.sh --help     -> mostrar ayuda
 
 set -euo pipefail
 
-# ─── Constantes ────────────────────────────────────────────────
+# --- Constantes ------------------------------------------------
 BINARY="ani-tui"
 REPO="glimp-ly/ani-tui"
 INSTALL_DIR="${PREFIX:-/usr/local}/bin"
 GITHUB_API="https://api.github.com/repos/${REPO}/releases/latest"
 
-# ─── Colores (solo si el terminal los soporta) ─────────────────
+# --- Colores (solo si el terminal los soporta) -----------------
 if [ -t 1 ] && command -v tput &>/dev/null && tput colors &>/dev/null; then
     C_BOLD=$(tput bold)
     C_GREEN=$(tput setaf 2)
@@ -25,151 +25,168 @@ else
     C_BOLD="" C_GREEN="" C_YELLOW="" C_RED="" C_CYAN="" C_RESET=""
 fi
 
-info()    { printf "%s==>%s %s%s\n" "${C_GREEN}${C_BOLD}" "${C_RESET}" "$*" "${C_RESET}"; }
-warn()    { printf "%s[!]%s %s%s\n" "${C_YELLOW}" "${C_RESET}" "$*" "${C_RESET}"; }
-die()     { printf "%s[✗]%s %s%s\n" "${C_RED}" "${C_RESET}" "$*" "${C_RESET}" >&2; exit 1; }
-step()    { printf "%s  →%s %s\n"   "${C_CYAN}" "${C_RESET}" "$*"; }
+info()  { printf "%s==>%s %s\n" "${C_GREEN}${C_BOLD}" "${C_RESET}" "$*"; }
+warn()  { printf "%s[!]%s %s\n" "${C_YELLOW}" "${C_RESET}" "$*"; }
+die()   { printf "%s[x]%s %s\n" "${C_RED}" "${C_RESET}" "$*" >&2; exit 1; }
+step()  { printf "%s  ->%s %s\n" "${C_CYAN}" "${C_RESET}" "$*"; }
 
-# ─── Ayuda ─────────────────────────────────────────────────────
+# --- Ayuda -----------------------------------------------------
 usage() {
     cat <<EOF
 ${C_BOLD}ani-tui installer${C_RESET}
 
-Uso: $0 [OPCIÓN]
+Uso: $0 [OPCION]
 
 Opciones:
   (sin args)   Compilar e instalar desde el repo local usando Cargo
-  --release    Descargar e instalar el binario del último GitHub release
+  --release    Descargar e instalar el binario del ultimo GitHub release
   --help       Mostrar esta ayuda
 
-Destino de instalación: ${INSTALL_DIR}
+Destino de instalacion: ${INSTALL_DIR}
   Puede cambiarse con la variable PREFIX:  PREFIX=~/.local ./install.sh
 
 Dependencias opcionales:
-  mpv          Reproductor de video (recomendado para reproducción sin anuncios)
+  mpv          Reproductor de video (recomendado para reproduccion sin anuncios)
   xdg-utils    Para abrir URLs en el navegador (fallback)
 EOF
 }
 
-# ─── Verificar comando disponible ──────────────────────────────
+# --- Verificar comando disponible ------------------------------
 need() {
-    command -v "$1" &>/dev/null || die "Se requiere '$1' pero no está instalado."
+    command -v "$1" &>/dev/null || die "Se requiere '$1' pero no esta instalado."
 }
 
-# ─── Detectar arquitectura para los releases ───────────────────
+# --- Detectar arquitectura -------------------------------------
 detect_arch() {
     local machine
     machine=$(uname -m)
     case "$machine" in
-        x86_64)          echo "x86_64-unknown-linux-gnu" ;;
-        aarch64|arm64)   echo "aarch64-unknown-linux-gnu" ;;
-        *)               die "Arquitectura no soportada: $machine" ;;
+        x86_64)        echo "x86_64-unknown-linux-gnu" ;;
+        aarch64|arm64) echo "aarch64-unknown-linux-gnu" ;;
+        *)             die "Arquitectura no soportada: $machine" ;;
     esac
 }
 
-# ─── Determinar si se requiere sudo para escribir en INSTALL_DIR ───
+# --- Determinar si se requiere sudo ----------------------------
 needs_sudo() {
     [ ! -w "$INSTALL_DIR" ]
 }
 
-# ─── Instalar el binario (con o sin sudo) ──────────────────────
+# --- Instalar el binario (con o sin sudo) ----------------------
 install_binary() {
     local src="$1"
     local dest="${INSTALL_DIR}/${BINARY}"
-
     mkdir -p "$INSTALL_DIR" 2>/dev/null || true
-
     if needs_sudo; then
-        step "Instalando en ${dest} (se requerirá contraseña)..."
+        step "Instalando en ${dest} (se requerira contrasena)..."
         sudo install -Dm755 "$src" "$dest"
     else
         install -Dm755 "$src" "$dest"
     fi
 }
 
-# ═══════════════════════════════════════════════════════════════
+# ==============================================================
 # MODO 1: Compilar desde el repo local
-# ═══════════════════════════════════════════════════════════════
+# ==============================================================
 install_from_source() {
-    info "Instalando ${BINARY} desde el código fuente..."
-
+    info "Instalando ${BINARY} desde el codigo fuente..."
     need cargo
-
-    # Verificar que estamos en el directorio correcto
-    [ -f Cargo.toml ] || die "Ejecuta el script desde la raíz del repositorio."
-    grep -q "name = \"${BINARY}\"" Cargo.toml || die "Este no parece ser el repositorio de ${BINARY}."
-
+    [ -f Cargo.toml ] || die "Ejecuta el script desde la raiz del repositorio."
+    grep -q "name = \"${BINARY}\"" Cargo.toml \
+        || die "Este no parece ser el repositorio de ${BINARY}."
     step "Compilando en modo release (esto puede tardar unos minutos)..."
     cargo build --release --quiet
-
     local built="target/release/${BINARY}"
-    [ -f "$built" ] || die "La compilación falló: no se encontró el binario."
-
+    [ -f "$built" ] || die "La compilacion fallo: no se encontro el binario."
     install_binary "$built"
-    info "✓ ${BINARY} instalado en ${INSTALL_DIR}/${BINARY}"
+    info "OK: ${BINARY} instalado en ${INSTALL_DIR}/${BINARY}"
     "${INSTALL_DIR}/${BINARY}" --version 2>/dev/null || true
 }
 
-# ═══════════════════════════════════════════════════════════════
-# MODO 2: Descargar el binario del último GitHub release
-# ═══════════════════════════════════════════════════════════════
+# ==============================================================
+# MODO 2: Descargar el binario del ultimo GitHub release
+# ==============================================================
 install_from_release() {
-    info "Instalando/actualizando ${BINARY} desde el último GitHub release..."
-
+    info "Instalando/actualizando ${BINARY} desde el ultimo GitHub release..."
     need curl
 
-    # Obtener metadata del release
-    step "Consultando el último release..."
+    step "Consultando el ultimo release..."
     local release_json
     release_json=$(curl -fsSL "$GITHUB_API") \
-        || die "No se pudo conectar a la API de GitHub. Verifica tu conexión."
+        || die "No se pudo conectar a la API de GitHub. Verifica tu conexion."
 
-    # Extraer versión (sin jq)
-    local version
-    version=$(printf '%s' "$release_json" | grep '"tag_name"' | head -1 \
-              | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
-    [ -n "$version" ] || die "No se pudo determinar la versión del release."
+    # Extraer tag y nombre del release
+    local tag_name release_name
+    tag_name=$(printf '%s' "$release_json" | grep '"tag_name"' | head -1 \
+               | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+    release_name=$(printf '%s' "$release_json" | grep '"name"' | head -1 \
+                   | sed 's/.*"name": *"\([^"]*\)".*/\1/')
+    [ -n "$tag_name" ] || die "No se pudo obtener informacion del release."
 
-    # Verificar si ya está instalada la misma versión
-    if command -v "$BINARY" &>/dev/null; then
+    # Version a mostrar: usar nombre del release si contiene un numero de version
+    local display_version="$tag_name"
+    printf '%s' "$release_name" | grep -qE '[0-9]+\.[0-9]+' \
+        && display_version="$release_name"
+
+    step "Ultimo release: ${display_version} (tag: ${tag_name})"
+
+    # Comparar version solo si el tag es semver (ej. v0.2.0)
+    local tag_semver="${tag_name#v}"
+    if command -v "$BINARY" &>/dev/null \
+       && printf '%s' "$tag_semver" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
         local current
-        current=$("$BINARY" --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || true)
-        local remote="${version#v}"
-        if [ -n "$current" ] && [ "$current" = "$remote" ]; then
-            info "Ya tienes la versión más reciente: ${version}"
+        current=$("$BINARY" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        if [ -n "$current" ] && [ "$current" = "$tag_semver" ]; then
+            info "Ya tienes la version mas reciente: ${display_version}"
             exit 0
         fi
-        [ -n "$current" ] && step "Actualizando ${current} → ${remote}..."
+        [ -n "$current" ] && step "Actualizando ${current} -> ${tag_semver}..."
     fi
 
     local arch
     arch=$(detect_arch)
 
-    # Nombre del asset esperado en el release
-    local asset_name="${BINARY}-${arch}.tar.gz"
-
-    # Extraer URL del asset desde el JSON (sin jq)
-    local download_url
-    download_url=$(printf '%s' "$release_json" \
+    # Obtener todas las URLs de assets del release
+    local all_urls
+    all_urls=$(printf '%s' "$release_json" \
         | grep '"browser_download_url"' \
-        | grep "$asset_name" \
-        | head -1 \
         | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/')
 
-    # Fallback: intentar con binario crudo (sin extensión)
+    local download_url=""
+
+    # Prioridad 1: binario + arquitectura + tarball
+    #   ej: ani-tui-x86_64-unknown-linux-gnu.tar.gz
+    download_url=$(printf '%s' "$all_urls" \
+        | grep "${BINARY}-${arch}\.tar\.gz" | head -1 || true)
+
+    # Prioridad 2: binario + arquitectura sin extension
+    #   ej: ani-tui-x86_64-unknown-linux-gnu
     if [ -z "$download_url" ]; then
-        local asset_raw="${BINARY}-${arch}"
-        download_url=$(printf '%s' "$release_json" \
-            | grep '"browser_download_url"' \
-            | grep "$asset_raw" \
-            | grep -v '\.tar\.gz\|\.zip\|\.sha' \
-            | head -1 \
-            | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/')
+        download_url=$(printf '%s' "$all_urls" \
+            | grep "${BINARY}-${arch}" \
+            | grep -vE '\.(tar\.gz|zip|sha|sig)$' \
+            | head -1 || true)
     fi
 
-    [ -n "$download_url" ] || die "No se encontró un binario para tu arquitectura (${arch}) en el release ${version}."
+    # Prioridad 3: binario con nombre exacto del proyecto (sin arquitectura)
+    #   ej: ani-tui  (formato actual del release)
+    if [ -z "$download_url" ]; then
+        download_url=$(printf '%s' "$all_urls" \
+            | grep -E "/${BINARY}$" \
+            | head -1 || true)
+    fi
 
-    step "Descargando ${version} para ${arch}..."
+    # Prioridad 4: cualquier asset ejecutable (excluye checksums y firmas)
+    if [ -z "$download_url" ]; then
+        download_url=$(printf '%s' "$all_urls" \
+            | grep -vE '\.(sha256|sha512|asc|sig|tar\.gz|zip)$' \
+            | head -1 || true)
+    fi
+
+    [ -n "$download_url" ] \
+        || die "No se encontro ningun binario en el release '${tag_name}'."
+
+    step "Descargando: ${download_url##*/}"
 
     # Directorio temporal con limpieza garantizada al salir
     local tmpdir
@@ -188,7 +205,7 @@ install_from_release() {
         tar -xzf "${tmpfile}.download" -C "$tmpdir"
         local extracted
         extracted=$(find "$tmpdir" -maxdepth 3 -type f -name "$BINARY" | head -1)
-        [ -n "$extracted" ] || die "No se encontró '${BINARY}' dentro del tarball."
+        [ -n "$extracted" ] || die "No se encontro '${BINARY}' dentro del tarball."
         mv "$extracted" "$tmpfile"
     else
         mv "${tmpfile}.download" "$tmpfile"
@@ -201,19 +218,19 @@ install_from_release() {
         || die "El binario descargado no responde correctamente. Abortando."
 
     install_binary "$tmpfile"
-    info "✓ ${BINARY} ${version} instalado en ${INSTALL_DIR}/${BINARY}"
+    info "OK: ${BINARY} instalado en ${INSTALL_DIR}/${BINARY}"
     "${INSTALL_DIR}/${BINARY}" --version 2>/dev/null || true
 }
 
-# ─── Aviso sobre dependencias opcionales ───────────────────────
+# --- Aviso sobre dependencias opcionales -----------------------
 check_optional_deps() {
     command -v mpv &>/dev/null \
-        || warn "mpv no encontrado — instálalo para reproducción directa sin anuncios"
+        || warn "mpv no encontrado -- instalalo para reproduccion directa sin anuncios"
 }
 
-# ═══════════════════════════════════════════════════════════════
+# ==============================================================
 # Punto de entrada
-# ═══════════════════════════════════════════════════════════════
+# ==============================================================
 main() {
     case "${1:-}" in
         --help|-h)
@@ -228,7 +245,7 @@ main() {
             check_optional_deps
             ;;
         *)
-            die "Opción desconocida: '$1'. Usa --help para ver las opciones disponibles."
+            die "Opcion desconocida: '$1'. Usa --help para ver las opciones."
             ;;
     esac
 }
