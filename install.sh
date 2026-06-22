@@ -12,6 +12,10 @@ BINARY="ani-tui"
 REPO="glimp-ly/ani-tui"
 INSTALL_DIR="${PREFIX:-/usr/local}/bin"
 GITHUB_API="https://api.github.com/repos/${REPO}/releases/latest"
+_TMPDIR=""  # scope global para que el trap EXIT siempre lo vea
+
+_cleanup() { [ -n "$_TMPDIR" ] && rm -rf "$_TMPDIR"; }
+trap '_cleanup' EXIT
 
 # --- Colores (solo si el terminal los soporta) -----------------
 if [ -t 1 ] && command -v tput &>/dev/null && tput colors &>/dev/null; then
@@ -188,12 +192,10 @@ install_from_release() {
 
     step "Descargando: ${download_url##*/}"
 
-    # Directorio temporal con limpieza garantizada al salir
-    local tmpdir
-    tmpdir=$(mktemp -d)
-    trap 'rm -rf "$tmpdir"' EXIT
+    # Directorio temporal — variable global para que el trap EXIT lo alcance
+    _TMPDIR=$(mktemp -d)
 
-    local tmpfile="${tmpdir}/${BINARY}"
+    local tmpfile="${_TMPDIR}/${BINARY}"
     curl -fsSL --progress-bar -o "${tmpfile}.download" "$download_url"
 
     # Detectar si es tarball o binario directo
@@ -202,9 +204,9 @@ install_from_release() {
 
     if printf '%s' "$mime" | grep -qi 'gzip\|tar'; then
         step "Extrayendo tarball..."
-        tar -xzf "${tmpfile}.download" -C "$tmpdir"
+        tar -xzf "${tmpfile}.download" -C "$_TMPDIR"
         local extracted
-        extracted=$(find "$tmpdir" -maxdepth 3 -type f -name "$BINARY" | head -1)
+        extracted=$(find "$_TMPDIR" -maxdepth 3 -type f -name "$BINARY" | head -1)
         [ -n "$extracted" ] || die "No se encontro '${BINARY}' dentro del tarball."
         mv "$extracted" "$tmpfile"
     else
@@ -218,6 +220,8 @@ install_from_release() {
         || die "El binario descargado no responde correctamente. Abortando."
 
     install_binary "$tmpfile"
+    # Limpiar explicitamente (el trap EXIT es red de seguridad adicional)
+    _cleanup
     info "OK: ${BINARY} instalado en ${INSTALL_DIR}/${BINARY}"
     "${INSTALL_DIR}/${BINARY}" --version 2>/dev/null || true
 }
