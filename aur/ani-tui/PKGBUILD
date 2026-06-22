@@ -17,7 +17,7 @@ optdepends=(
     'xdg-utils: abrir URLs en el navegador del sistema'
 )
 source=("${pkgname}-${pkgver}.tar.gz::https://github.com/glimp-ly/ani-tui/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('222b65bb4c42b7f37f3e45d3c86fd3e43d10aa60b1327c11fe06653ca5cf3942')
+sha256sums=('b54aae98f6d26936427b72039b39fb9fdf36d2b4ba290166b3ea88b2b66bdb1c')
 # NOTA: tras hacer `git push --tags`, verificar y actualizar el sha256 con:
 #   curl -sL https://github.com/glimp-ly/ani-tui/archive/refs/tags/v0.2.0.tar.gz | sha256sum
 
