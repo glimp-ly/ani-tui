@@ -21,20 +21,70 @@ Aplicación de terminal (TUI) escrita en Rust que permite buscar anime en `anime
 
 ## Instalación
 
-### Requisitos
+### Dependencias
 
-- Rust 1.70+ (con Cargo)
-- `mpv` (opcional, pero recomendado para reproducción automatica)
+| Dependencia | Para qué | Requerida |
+|-------------|----------|-----------|
+| `curl` | Descargar releases de GitHub (`--release`) | Solo para `--release` |
+| `cargo` (Rust ≥ 1.70) | Compilar desde fuente | Solo para compilar |
+| `mpv` | Reproducción directa de video sin anuncios | Opcional (recomendado) |
+| `xdg-utils` | Abrir URLs en el navegador del sistema (fallback) | Opcional |
+
+Para instalar las dependencias:
+
+```bash
+# Arch Linux
+sudo pacman -S curl rust mpv xdg-utils
+
+# Debian / Ubuntu
+sudo apt install curl cargo mpv xdg-utils
+
+# Fedora
+sudo dnf install curl cargo mpv xdg-utils
+```
+
+> `mpv` y `xdg-utils` son opcionales: sin ellos, ani-tui seguirá funcionando
+> pero no podrá reproducir video directamente.
+
+---
+
+### Método 1 — Script de instalación (recomendado)
 
 ```bash
 # Clonar el repositorio
-git clone https://github.com/glimp/ani-tui
+git clone https://github.com/glimp-ly/ani-tui
+cd ani-tui
+
+# Dar permisos de ejecución al script
+chmod +x install.sh
+
+# Instalar compilando desde el código fuente (requiere cargo)
+./install.sh
+
+# — O — descargar e instalar el binario precompilado del último release
+./install.sh --release
+
+# Instalar en un directorio sin sudo (ej. ~/.local/bin)
+PREFIX=~/.local ./install.sh --release
+```
+
+El script detecta automáticamente si necesita `sudo` según el directorio de destino
+(`/usr/local/bin` por defecto). Con `PREFIX=~/.local` se instala en `~/.local/bin`
+sin necesidad de privilegios.
+
+---
+
+### Método 2 — Manual (desde el código fuente)
+
+```bash
+# Clonar el repositorio
+git clone https://github.com/glimp-ly/ani-tui
 cd ani-tui
 
 # Compilar en modo release
 cargo build --release
 
-# Instalar en el sistema (opcional)
+# Instalar en el sistema
 sudo cp target/release/ani-tui /usr/local/bin/
 ```
 
