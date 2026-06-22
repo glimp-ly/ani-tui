@@ -1,0 +1,16 @@
+pkgbase = ani-tui
+	pkgdesc = TUI interactiva para buscar y reproducir anime desde animeav1.com sin anuncios
+	pkgver = 0.2.0
+	pkgrel = 1
+	url = https://github.com/glimp-ly/ani-tui
+	arch = x86_64
+	arch = aarch64
+	license = GPL3
+	makedepends = cargo
+	depends = gcc-libs
+	optdepends = mpv: reproducción directa de video sin anuncios (recomendado)
+	optdepends = xdg-utils: abrir URLs en el navegador del sistema
+	source = ani-tui-0.2.0.tar.gz::https://github.com/glimp-ly/ani-tui/archive/refs/tags/v0.2.0.tar.gz
+	sha256sums = 222b65bb4c42b7f37f3e45d3c86fd3e43d10aa60b1327c11fe06653ca5cf3942
+
+pkgname = ani-tui
