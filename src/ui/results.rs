@@ -54,7 +54,7 @@ pub fn render_results(f: &mut Frame, app: &App) {
     render_synopsis_panel(f, app, layout[1]);
     render_results_keybindings(f, app, layout[2]);
 
-    // Overlay de carga/error
+    // Overlay de carga/error/info
     if app.loading.is_loading() {
         if let Some(msg) = app.loading.message() {
             crate::ui::search::render_loading_overlay(f, area, app.spinner_char(), msg);
@@ -62,6 +62,9 @@ pub fn render_results(f: &mut Frame, app: &App) {
     }
     if let Some(ref err) = app.error_message {
         crate::ui::search::render_error_overlay(f, area, err);
+    }
+    if let Some(ref info) = app.info_message {
+        crate::ui::search::render_info_overlay(f, area, info);
     }
 }
 

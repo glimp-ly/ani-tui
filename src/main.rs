@@ -172,9 +172,13 @@ async fn run_tui() -> Result<()> {
                     continue;
                 }
 
-                // Limpiar error al presionar cualquier tecla
+                // Limpiar error/info al presionar cualquier tecla
                 if app.error_message.is_some() {
                     app.error_message = None;
+                    continue;
+                }
+                if app.info_message.is_some() {
+                    app.info_message = None;
                     continue;
                 }
 
@@ -524,11 +528,9 @@ fn handle_sources_input(app: &mut App, code: KeyCode) {
                     }
                     // Mostrar mensaje de estado en la TUI
                     let msg = result.display_message();
-                    // El mensaje se muestra brevemente como info (no error)
-                    if matches!(result, player::PlayResult::Error(_) | player::PlayResult::NoSources) {
-                        // error ya establecido arriba
-                    } else {
-                        app.error_message = Some(msg); // reutilizar para mensaje de info
+                    // Los errores ya están establecidos arriba; el lanzamiento exitoso muestra info
+                    if !matches!(result, player::PlayResult::Error(_) | player::PlayResult::NoSources) {
+                        app.set_info(msg);
                     }
                 }
             }

@@ -134,6 +134,11 @@ pub fn render_search(f: &mut Frame, app: &App) {
         render_error_overlay(f, area, err);
     }
 
+    // — Mensaje informativo (si hay) —
+    if let Some(ref info) = app.info_message {
+        render_info_overlay(f, area, info);
+    }
+
     // — Indicador de carga —
     if app.loading.is_loading() {
         if let Some(msg) = app.loading.message() {
@@ -317,4 +322,52 @@ pub fn render_error_overlay(f: &mut Frame, area: Rect, message: &str) {
         .alignment(Alignment::Center);
 
     f.render_widget(error_widget, overlay_area);
+}
+
+/// Renderiza un overlay informativo (no de error) sobre la pantalla actual.
+pub fn render_info_overlay(f: &mut Frame, area: Rect, message: &str) {
+    let lines: Vec<&str> = message.lines().collect();
+    let max_width = lines.iter().map(|l| l.len()).max().unwrap_or(20);
+    let width = (max_width as u16 + 6).min(area.width - 4).max(30);
+    let height = (lines.len() as u16 + 4).min(area.height - 4);
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+
+    let overlay_area = Rect::new(area.x + x, area.y + y, width, height);
+    f.render_widget(Clear, overlay_area);
+
+    let info_text: Vec<Line> = std::iter::once(
+        Line::from(Span::styled(
+            "ℹ Info",
+            Style::default()
+                .fg(palette::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ))
+    )
+    .chain(
+        lines.iter().map(|l| {
+            Line::from(Span::styled(*l, Style::default().fg(palette::TEXT)))
+        })
+    )
+    .chain(std::iter::once(
+        Line::from(Span::styled(
+            "Presiona cualquier tecla para continuar",
+            Style::default()
+                .fg(palette::TEXT_DIM)
+                .add_modifier(Modifier::ITALIC),
+        ))
+    ))
+    .collect();
+
+    let info_widget = Paragraph::new(info_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Double)
+                .border_style(Style::default().fg(palette::ACCENT))
+                .style(Style::default().bg(palette::BG)),
+        )
+        .alignment(Alignment::Center);
+
+    f.render_widget(info_widget, overlay_area);
 }

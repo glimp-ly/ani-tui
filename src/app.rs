@@ -141,6 +141,9 @@ pub struct App {
     /// Mensaje de error para mostrar al usuario (None = sin error)
     pub error_message: Option<String>,
 
+    /// Mensaje informativo para mostrar al usuario (None = sin mensaje)
+    pub info_message: Option<String>,
+
     /// Información sobre reproductores disponibles en el sistema
     pub player_info: PlayerInfo,
 
@@ -175,6 +178,7 @@ impl App {
 
             loading: LoadingState::Idle,
             error_message: None,
+            info_message: None,
             player_info: crate::player::player_info(),
             spinner_frame: 0,
         }
@@ -191,6 +195,7 @@ impl App {
     /// - Search → quit (si el campo está vacío)
     pub fn go_back(&mut self) {
         self.error_message = None;
+        self.info_message = None;
         match self.screen {
             Screen::Sources => self.screen = Screen::Episodes,
             Screen::Episodes => self.screen = Screen::Results,
@@ -325,6 +330,7 @@ impl App {
         self.last_query = Some(query);
         self.loading = LoadingState::Idle;
         self.error_message = None;
+        self.info_message = None;
 
         // Seleccionar el primer resultado automáticamente
         if !self.search_results.is_empty() {
@@ -339,6 +345,7 @@ impl App {
         self.episodes = episodes;
         self.loading = LoadingState::Idle;
         self.error_message = None;
+        self.info_message = None;
 
         if !self.episodes.is_empty() {
             self.episodes_state.select(Some(0));
@@ -352,6 +359,7 @@ impl App {
         self.sources = sources;
         self.loading = LoadingState::Idle;
         self.error_message = None;
+        self.info_message = None;
         self.selected_audio = AudioType::Sub;
 
         // Seleccionar primera fuente automáticamente
@@ -365,6 +373,11 @@ impl App {
     pub fn set_error(&mut self, msg: impl Into<String>) {
         self.error_message = Some(msg.into());
         self.loading = LoadingState::Idle;
+    }
+
+    /// Establece un mensaje informativo para mostrar al usuario.
+    pub fn set_info(&mut self, msg: impl Into<String>) {
+        self.info_message = Some(msg.into());
     }
 
     /// Alterna entre audio SUB y DUB en la pantalla de fuentes.

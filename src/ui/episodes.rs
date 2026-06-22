@@ -58,6 +58,9 @@ pub fn render_episodes(f: &mut Frame, app: &App) {
     if let Some(ref err) = app.error_message {
         crate::ui::search::render_error_overlay(f, area, err);
     }
+    if let Some(ref info) = app.info_message {
+        crate::ui::search::render_info_overlay(f, area, info);
+    }
 }
 
 /// Renderiza la lista de episodios con selección activa.
