@@ -1,5 +1,8 @@
 # 🎌 ani-tui
 
+> [!WARNING]
+> **POR EL MOMENTO SE RECOMIENDA ENCARECIDAMENTE LA OPCIÓN 2 DE INSTALACIÓN**
+
 > **TUI interactiva para buscar y reproducir anime sin anuncios**
 
 Aplicación de terminal (TUI) escrita en Rust que permite buscar anime en `animeav1.com` y reproducirlo directamente con `mpv` o en el navegador — sin anuncios, sin Chrome, sin Electron.
