@@ -25,31 +25,47 @@
 // ============================================================
 
 use anyhow::{Context, Result};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
+use std::time::Duration;
 
+use crate::config::USER_AGENT;
 use crate::logger;
-use crate::resolver::{resolve_url, ResolvedUrl, StreamType};
-use crate::structs::VideoSource;
+use crate::resolver::{resolve_url, ResolvedUrl};
+use crate::structs::{truncate_chars, VideoSource};
 
 // ————————————————————————————————————————————————
 // Verificación de disponibilidad de mpv
 // ————————————————————————————————————————————————
 
-/// Verifica si `mpv` está instalado y disponible en el PATH del sistema.
+static MPV_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+/// Verifica si `mpv` está instalado y ejecutable en el PATH del sistema.
+/// Cachea el resultado durante la ejecución para evitar lanzar subprocesos repetidos.
 pub fn is_mpv_available() -> bool {
-    let available = Command::new("which")
-        .arg("mpv")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    *MPV_AVAILABLE.get_or_init(|| {
+        let available = Command::new("mpv")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
 
-    logger::log_info("player", &format!(
-        "mpv disponible: {}", if available { "SÍ" } else { "NO (instalar con: sudo apt install mpv)" }
-    ));
+        logger::log_info(
+            "player",
+            &format!(
+                "mpv disponible: {}",
+                if available {
+                    "SÍ"
+                } else {
+                    "NO (instalar con: sudo apt install mpv)"
+                }
+            ),
+        );
 
-    available
+        available
+    })
 }
 
 // ————————————————————————————————————————————————
@@ -87,14 +103,11 @@ impl PlayResult {
 
 /// Reproduce una fuente de video resolviendo primero su URL real.
 ///
-/// Este es el punto de entrada principal para reproducción.
-/// La resolución de URL puede ser asíncrona (fetch HTTP para MP4Upload).
-///
 /// # Flujo
 /// 1. Llama a `resolver::resolve_url()` para convertir embed → stream directo
-/// 2. Si es DirectStream → intenta mpv (con headers Referer si los hay)
-/// 3. Si mpv falla o no está disponible → abre en navegador
-/// 4. Si es FallbackBrowser → abre en navegador directamente
+/// 2. Si es DirectStream → intenta mpv con User-Agent, Referer y headers extra
+/// 3. Si mpv falla inmediatamente o no está disponible → abre `source.url` en navegador
+/// 4. Si es FallbackBrowser → abre directamente en navegador
 pub async fn play_source_async(source: &VideoSource) -> PlayResult {
     logger::log_info("player", &format!(
         "Iniciando reproducción: servidor={}, audio={}",
@@ -102,23 +115,25 @@ pub async fn play_source_async(source: &VideoSource) -> PlayResult {
         source.audio.display()
     ));
 
-    // Resolver la URL embed → URL directa reproducible
     let resolved = resolve_url(&source.server, &source.url).await;
 
     match resolved {
-        ResolvedUrl::DirectStream { url, referer, content_type } => {
+        ResolvedUrl::DirectStream {
+            url,
+            referer,
+            headers,
+            content_type,
+        } => {
             logger::log_info("player", &format!(
-                "URL resuelta — tipo: {}, referer: {}",
+                "URL resuelta — tipo: {}, referer: {}, headers: {}",
                 content_type.display(),
-                referer.as_deref().unwrap_or("ninguno")
+                referer.as_deref().unwrap_or("ninguno"),
+                headers.len()
             ));
 
-            // Intentar con mpv primero
             if is_mpv_available() {
-                match launch_mpv(&url, referer.as_deref()) {
-                    Ok(()) => {
-                        return PlayResult::LaunchedMpv { url };
-                    }
+                match launch_mpv_async(&url, referer.as_deref(), &headers).await {
+                    Ok(()) => return PlayResult::LaunchedMpv { url },
                     Err(e) => {
                         logger::log_warn("player", &format!(
                             "mpv falló ({}), usando navegador...", e
@@ -129,14 +144,8 @@ pub async fn play_source_async(source: &VideoSource) -> PlayResult {
                 logger::log_info("player", "mpv no disponible → usando navegador");
             }
 
-            // Para HLS, abrir el player original (mejor experiencia web)
-            // Usamos unwrap_or ya que is_some() fue verificado en la condición
-            let browser_url = if content_type == StreamType::Hls && referer.is_some() {
-                referer.unwrap_or(url.clone())
-            } else {
-                url.clone()
-            };
-
+            // En fallback web abrir la URL original del embed/player resulta más fiable
+            let browser_url = source.url.clone();
             match open_in_browser(&browser_url) {
                 Ok(()) => PlayResult::LaunchedBrowser { url: browser_url },
                 Err(e) => PlayResult::Error(e.to_string()),
@@ -155,105 +164,108 @@ pub async fn play_source_async(source: &VideoSource) -> PlayResult {
     }
 }
 
-/// Versión síncrona de reproducción (para compatibilidad con el event loop de la TUI).
-/// Usa tokio::task::block_in_place para ejecutar código async en contexto síncrono.
-pub fn play_source(source: &VideoSource) -> PlayResult {
-    // Usar el runtime de tokio existente para ejecutar la resolución async
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            // Estamos dentro de un runtime de tokio — usar block_in_place
-            tokio::task::block_in_place(|| {
-                handle.block_on(play_source_async(source))
-            })
-        }
-        Err(_) => {
-            // No hay runtime — fallback síncrono sin resolver
-            logger::log_warn("player", "No hay runtime tokio disponible — resolución limitada");
-            play_source_sync_fallback(source)
-        }
-    }
-}
-
-/// Fallback síncrono cuando no hay runtime de tokio disponible.
-/// Solo puede manejar PixelDrain (resolución sin HTTP) y navegador.
-fn play_source_sync_fallback(source: &VideoSource) -> PlayResult {
-    // Para PixelDrain podemos resolver sin async
-    if source.server == "PDrain" {
-        if let crate::resolver::ResolvedUrl::DirectStream { url, .. } =
-            crate::resolver::resolve_pixeldrain_sync(&source.url)
-        {
-            if is_mpv_available() {
-                if launch_mpv(&url, None).is_ok() {
-                    return PlayResult::LaunchedMpv { url };
-                }
-            }
-        }
-    }
-
-    // Para todos los demás: navegador
-    match open_in_browser(&source.url) {
-        Ok(()) => PlayResult::LaunchedBrowser { url: source.url.clone() },
-        Err(e) => PlayResult::Error(e.to_string()),
-    }
-}
-
 // ————————————————————————————————————————————————
 // Lanzar mpv
 // ————————————————————————————————————————————————
 
-/// Lanza mpv para reproducir la URL dada.
-///
-/// Opciones utilizadas:
-/// - `--no-terminal`: No mostrar barra de progreso en la terminal (preserva la TUI)
-/// - `--really-quiet`: Silenciar output de mpv que interferiría con la TUI
-/// - `--referrer=<url>`: Header Referer para URLs que lo requieren (como HLS de Zilla)
-/// - spawn() en background: no bloquea la TUI mientras mpv está abierto
-///
-/// SEGURIDAD: Los argumentos se pasan como array (no como string de shell),
-/// lo que previene command injection aunque la URL contenga caracteres especiales.
-fn launch_mpv(url: &str, referer: Option<&str>) -> Result<()> {
-    // SEGURIDAD: Validar que la URL es http/https antes de pasarla a mpv
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        let msg = format!("URL rechazada por seguridad (no http/https): {}", &url[..url.len().min(40)]);
+fn has_control_chars(s: &str) -> bool {
+    s.chars().any(|c| c == '\r' || c == '\n' || c == '\0')
+}
+
+/// Construye la lista de argumentos seguros para lanzar `mpv`.
+pub(crate) fn build_mpv_args(
+    url: &str,
+    referer: Option<&str>,
+    headers: &[(String, String)],
+) -> Result<Vec<String>> {
+    // SEGURIDAD: Validar que la URL es http/https sin caracteres de control
+    if (!url.starts_with("https://") && !url.starts_with("http://")) || has_control_chars(url) {
+        let msg = format!(
+            "URL rechazada por seguridad (no http/https): {}",
+            truncate_chars(url, 40)
+        );
         logger::log_security("player::mpv", &msg);
         return Err(anyhow::anyhow!(msg));
     }
 
-    let mut cmd = Command::new("mpv");
+    let mut args = vec![
+        "--no-terminal".to_string(),
+        "--really-quiet".to_string(),
+        "--force-window=immediate".to_string(),
+        format!("--user-agent={}", USER_AGENT),
+    ];
 
-    // Argumentos base de mpv
-    cmd.arg("--no-terminal") // No interferir con la TUI
-       .arg("--really-quiet"); // Silenciar output
-
-    // Agregar Referer si es necesario (para URLs de Zilla Networks)
     if let Some(ref_url) = referer {
-        // SEGURIDAD: Validar el Referer también
-        if ref_url.starts_with("https://") || ref_url.starts_with("http://") {
-            cmd.arg(format!("--referrer={}", ref_url));
+        if (ref_url.starts_with("https://") || ref_url.starts_with("http://"))
+            && !has_control_chars(ref_url)
+        {
+            args.push(format!("--referrer={}", ref_url));
         }
     }
 
-    // URL del stream (último argumento)
-    cmd.arg(url);
-
-    // Desconectar de stdin/stdout/stderr de la TUI
-    cmd.stdin(Stdio::null())
-       .stdout(Stdio::null())
-       .stderr(Stdio::null());
-
-    // Log del comando (sin la URL completa por privacidad)
-    let has_referer = referer.is_some();
-    if has_referer {
-        logger::log_cmd("mpv", &["--no-terminal", "--really-quiet", "--referrer=[referer]", "[url]"], "lanzando...");
-    } else {
-        logger::log_cmd("mpv", &["--no-terminal", "--really-quiet", "[url]"], "lanzando...");
+    for (name, value) in headers {
+        if !name.is_empty() && !has_control_chars(name) && !has_control_chars(value) {
+            args.push(format!("--http-header-fields-append={}: {}", name, value));
+        }
     }
 
-    cmd.spawn()
-       .map(|_| {
-           logger::log_info("player::mpv", "mpv lanzado exitosamente en background");
-       })
-       .context("Error al lanzar mpv")?;
+    args.push(url.to_string());
+    Ok(args)
+}
+
+fn spawn_mpv_child(
+    url: &str,
+    referer: Option<&str>,
+    headers: &[(String, String)],
+) -> Result<Child> {
+    let args = build_mpv_args(url, referer, headers)?;
+
+    let mut cmd = Command::new("mpv");
+    cmd.args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    logger::log_cmd(
+        "mpv",
+        &[
+            "--no-terminal",
+            "--really-quiet",
+            "--force-window=immediate",
+            if referer.is_some() { "--referrer=[referer]" } else { "--user-agent=[ua]" },
+            if headers.is_empty() { "[url]" } else { "--http-header-fields-append=[headers] [url]" },
+        ],
+        "lanzando...",
+    );
+
+    cmd.spawn().context("Error al lanzar mpv")
+}
+
+/// Lanza `mpv` en background, espera brevemente para detectar fallos inmediatos
+/// de red/arranque (ej. HTTP 403/404 rápido) y cosecha el proceso al finalizar.
+async fn launch_mpv_async(
+    url: &str,
+    referer: Option<&str>,
+    headers: &[(String, String)],
+) -> Result<()> {
+    let mut child = spawn_mpv_child(url, referer, headers)?;
+
+    // Pausa corta no bloqueante para detectar cierre prematuro por error del stream
+    tokio::time::sleep(Duration::from_millis(450)).await;
+
+    if let Some(status) = child.try_wait().context("Error comprobando estado de mpv")? {
+        return Err(anyhow::anyhow!("mpv salió prematuramente con estado {}", status));
+    }
+
+    logger::log_info("player::mpv", "mpv iniciado y reproduciendo en background");
+
+    // Evitar procesos zombie al cerrar la ventana de mpv durante la sesión TUI
+    tokio::task::spawn_blocking(move || {
+        match child.wait() {
+            Ok(status) => logger::log_info("player::mpv", &format!("mpv finalizó: {}", status)),
+            Err(e) => logger::log_warn("player::mpv", &format!("Error esperando a mpv: {}", e)),
+        }
+    });
 
     Ok(())
 }
@@ -270,8 +282,11 @@ fn launch_mpv(url: &str, referer: Option<&str>) -> Result<()> {
 /// previniendo inyección de comandos.
 fn open_in_browser(url: &str) -> Result<()> {
     // SEGURIDAD: Validar esquema antes de abrir
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        let msg = format!("URL rechazada (esquema no http/https): {}", &url[..url.len().min(40)]);
+    if (!url.starts_with("https://") && !url.starts_with("http://")) || has_control_chars(url) {
+        let msg = format!(
+            "URL rechazada (esquema no http/https): {}",
+            truncate_chars(url, 40)
+        );
         logger::log_security("player::browser", &msg);
         return Err(anyhow::anyhow!(msg));
     }
@@ -307,11 +322,46 @@ pub fn player_info() -> PlayerInfo {
 
 impl PlayerInfo {
     /// Descripción del estado del reproductor para mostrar en la TUI.
-    pub fn status_line(&self) -> String {
+    pub fn status_line(&self) -> &'static str {
         if self.mpv_available {
-            "🎬 mpv disponible — reproducción directa sin anuncios".to_string()
+            "mpv disponible — reproducción directa sin anuncios"
         } else {
-            "⚠️  mpv no encontrado — se usará el navegador del sistema".to_string()
+            "mpv no encontrado — se usará el navegador del sistema"
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_mpv_args_includes_ua_referer_headers_and_force_window() {
+        let headers = vec![
+            ("Origin".to_string(), "https://player.zilla-networks.com".to_string()),
+            ("Sec-Fetch-Site".to_string(), "same-origin".to_string()),
+        ];
+        let args = build_mpv_args(
+            "https://player.zilla-networks.com/m3u8/7601658844858539e438dceee32e7924",
+            Some("https://player.zilla-networks.com/play/7601658844858539e438dceee32e7924"),
+            &headers,
+        )
+        .unwrap();
+
+        assert!(args.contains(&"--no-terminal".to_string()));
+        assert!(args.contains(&"--really-quiet".to_string()));
+        assert!(args.contains(&"--force-window=immediate".to_string()));
+        assert!(args.iter().any(|a| a.starts_with("--user-agent=Mozilla/")));
+        assert!(args.contains(&"--referrer=https://player.zilla-networks.com/play/7601658844858539e438dceee32e7924".to_string()));
+        assert!(args.contains(&"--http-header-fields-append=Origin: https://player.zilla-networks.com".to_string()));
+        assert!(args.contains(&"--http-header-fields-append=Sec-Fetch-Site: same-origin".to_string()));
+    }
+
+    #[test]
+    fn build_mpv_args_rejects_bad_scheme_and_crlf_headers() {
+        assert!(build_mpv_args("file:///etc/passwd", None, &[]).is_err());
+        let bad_headers = vec![("Origin".to_string(), "https://ok\r\nEvil: 1".to_string())];
+        let args = build_mpv_args("https://example.com/v.mp4", None, &bad_headers).unwrap();
+        assert!(!args.iter().any(|a| a.contains("Evil:")));
     }
 }

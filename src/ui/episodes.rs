@@ -30,7 +30,7 @@ use crate::app::App;
 use crate::ui::search::palette;
 
 /// Renderiza la pantalla de lista de episodios.
-pub fn render_episodes(f: &mut Frame, app: &App) {
+pub fn render_episodes(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     // Fondo
@@ -64,32 +64,32 @@ pub fn render_episodes(f: &mut Frame, app: &App) {
 }
 
 /// Renderiza la lista de episodios con selección activa.
-fn render_episodes_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let anime = match &app.selected_anime {
-        Some(a) => a,
+fn render_episodes_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    let (anime_title, count_opt, score_opt) = match &app.selected_anime {
+        Some(a) => (a.title.clone(), a.episodes_count, a.score),
         None => return,
     };
 
     // Construir título del bloque
-    let count_str = anime.episodes_count
+    let count_str = count_opt
         .map(|c| format!("{} episodios", c))
         .unwrap_or_else(|| format!("{} episodios", app.episodes.len()));
 
-    let score_str = anime.score
+    let score_str = score_opt
         .map(|s| format!(" ★ {:.1}", s))
         .unwrap_or_default();
 
-    let selected_num = app.episodes_state
-        .selected()
+    let selected_idx = app.episodes_state.selected();
+    let selected_label = selected_idx
         .and_then(|i| app.episodes.get(i))
-        .map(|e| e.number)
-        .unwrap_or(0);
+        .map(|e| e.display_title())
+        .unwrap_or_else(|| "Ninguno".to_string());
 
     let block = Block::default()
         .title(Line::from(vec![
             Span::styled(" 📺 ", Style::default().fg(palette::ACCENT)),
             Span::styled(
-                &anime.title,
+                anime_title,
                 Style::default().fg(palette::TEXT).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -99,7 +99,7 @@ fn render_episodes_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Span::styled(" ", Style::default()),
         ]))
         .title_bottom(Line::from(Span::styled(
-            format!(" Episodio seleccionado: {} ", selected_num),
+            format!(" Seleccionado: {} ", selected_label),
             Style::default().fg(palette::TEXT_DIM),
         )).alignment(Alignment::Right))
         .borders(Borders::ALL)
@@ -112,7 +112,7 @@ fn render_episodes_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .iter()
         .enumerate()
         .map(|(i, episode)| {
-            let is_selected = app.episodes_state.selected() == Some(i);
+            let is_selected = selected_idx == Some(i);
 
             let prefix = if is_selected { "▶ " } else { "  " };
 
@@ -126,7 +126,7 @@ fn render_episodes_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 Span::styled(
                     format!("Ep. {:04}", episode.number),
                     Style::default()
-                        .fg(if is_selected { palette::ACCENT } else { palette::ACCENT })
+                        .fg(palette::ACCENT)
                         .add_modifier(if is_selected { Modifier::BOLD } else { Modifier::DIM }),
                 ),
             ]);
@@ -142,8 +142,7 @@ fn render_episodes_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .collect();
 
     let list = List::new(items).block(block);
-    let mut state = app.episodes_state.clone();
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, area, &mut app.episodes_state);
 }
 
 /// Renderiza los atajos de teclado para la pantalla de episodios.

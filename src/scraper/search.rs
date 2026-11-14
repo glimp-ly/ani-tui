@@ -13,25 +13,20 @@
 // NO se necesita JavaScript ni headless Chrome.
 // ============================================================
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use regex::Regex;
 use std::sync::OnceLock;
 
 use crate::config::BASE_URL;
-use crate::scraper::client::build_client;
-use crate::structs::{Anime, AnimeCategory};
+use crate::logger;
+use crate::scraper::client::fetch_html;
+use crate::scraper::{find_balanced_content, iter_top_level_objects, unescape_js_string};
+use crate::security;
+use crate::structs::{truncate_chars, Anime, AnimeCategory};
 
 // ————————————————————————————————————————————————
 // Patrones regex (compilados una sola vez al inicio)
 // ————————————————————————————————————————————————
-
-/// Extrae el bloque completo de resultados del HTML.
-/// Captura todo lo que está entre `results:[` y el cierre del array `]`.
-static RE_RESULTS_BLOCK: OnceLock<Regex> = OnceLock::new();
-
-/// Extrae un objeto de resultado individual del bloque.
-/// Los objetos tienen el formato {id:"...",title:"...",...}
-static RE_SINGLE_RESULT: OnceLock<Regex> = OnceLock::new();
 
 /// Extrae el campo `id` de un objeto de resultado.
 static RE_FIELD_ID: OnceLock<Regex> = OnceLock::new();
@@ -60,38 +55,23 @@ static RE_TOTAL_RECORDS: OnceLock<Regex> = OnceLock::new();
 // Inicialización de regexes
 // ————————————————————————————————————————————————
 
-fn get_re_results_block() -> &'static Regex {
-    RE_RESULTS_BLOCK.get_or_init(|| {
-        // Captura el array de results completo (puede ser muy largo)
-        // El lookahead ,total: marca el fin del array de results
-        Regex::new(r"results:\[(\{.+?\})\],total:").expect("regex results_block inválida")
-    })
-}
-
-fn get_re_single_result() -> &'static Regex {
-    RE_SINGLE_RESULT.get_or_init(|| {
-        // Cada resultado es un objeto JS separado por coma entre }{ 
-        Regex::new(r"\{id:").expect("regex single_result inválida")
-    })
-}
-
 fn get_re_field_id() -> &'static Regex {
     RE_FIELD_ID.get_or_init(|| {
-        // id:"197" — ID como string entre comillas
-        Regex::new(r#"^[^}]*?id:"(\d+)""#).expect("regex field_id inválida")
+        // id:"197" — ID del anime como string entre comillas
+        Regex::new(r#"\bid:"(\d+)""#).expect("regex field_id inválida")
     })
 }
 
 fn get_re_field_title() -> &'static Regex {
     RE_FIELD_TITLE.get_or_init(|| {
-        Regex::new(r#"title:"([^"]+)""#).expect("regex field_title inválida")
+        Regex::new(r#"title:"((?:[^"\\]|\\.)*)""#).expect("regex field_title inválida")
     })
 }
 
 fn get_re_field_slug() -> &'static Regex {
     RE_FIELD_SLUG.get_or_init(|| {
         // slug:"one-piece" — toma el primer slug encontrado en el objeto
-        Regex::new(r#"slug:"([^"]+)""#).expect("regex field_slug inválida")
+        Regex::new(r#"slug:"((?:[^"\\]|\\.)*)""#).expect("regex field_slug inválida")
     })
 }
 
@@ -169,40 +149,41 @@ pub struct SearchResult {
 /// }
 /// ```
 pub async fn search_anime(query: &str, page: u32) -> Result<SearchResult> {
-    let client = build_client().context("Error al inicializar cliente HTTP")?;
+    security::validate_search_query(query)
+        .map_err(|e| anyhow::anyhow!("Consulta de búsqueda inválida: {}", e))?;
+
+    let page = page.max(1);
 
     // Construir URL de búsqueda con paginación
     let url = format!(
         "{}/catalogo?search={}&page={}",
         BASE_URL,
-        urlencoding_simple(query),
+        urlencoding_simple(query.trim()),
         page
     );
 
-    // Realizar petición HTTP
-    let html = client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("Error al conectar con: {}", url))?
-        .text()
-        .await
-        .context("Error al leer respuesta del servidor")?;
+    let html = fetch_html(&url).await?;
 
     // Parsear los resultados del HTML
     parse_search_results(&html, page)
 }
 
-/// Codificación URL simple para los términos de búsqueda.
-/// Reemplaza espacios por '+' y codifica caracteres especiales básicos.
+/// Codificación URL compatible con UTF-8 para términos de búsqueda.
+/// Reemplaza espacios por '+' y codifica byte a byte en porcentaje `%XX`.
 fn urlencoding_simple(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            ' ' => "+".to_string(),
-            c if c.is_alphanumeric() || c == '-' || c == '_' => c.to_string(),
-            c => format!("%{:02X}", c as u32),
-        })
-        .collect()
+    let mut encoded = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b' ' => encoded.push('+'),
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(b as char);
+            }
+            byte => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
 }
 
 // ————————————————————————————————————————————————
@@ -212,23 +193,15 @@ fn urlencoding_simple(s: &str) -> String {
 /// Parsea los resultados de búsqueda del HTML del catálogo.
 ///
 /// Estrategia:
-/// 1. Localiza el bloque `results:[...]` en el HTML
-/// 2. Divide el bloque en objetos individuales separados por `},{`
-/// 3. Para cada objeto, extrae los campos con regex
-/// 4. Extrae datos de paginación del bloque `pagination:{...}`
-fn parse_search_results(html: &str, current_page: u32) -> Result<SearchResult> {
-    // — Extraer el bloque de results —
-    let re_block = get_re_results_block();
-    let results_block = re_block
-        .captures(html)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str())
-        // Fallback: buscar de forma más laxa si la regex estricta falla
-        .or_else(|| extract_results_block_fallback(html))
-        .unwrap_or("");
+/// 1. Localiza el bloque `results:[...]` mediante conteo balanceado respetando comillas
+/// 2. Itera los objetos de primer nivel del array sin copiar ni reemplazar strings
+/// 3. Para cada objeto, extrae y desescapa los campos con regex
+/// 4. Extrae datos de paginación del HTML
+pub fn parse_search_results(html: &str, current_page: u32) -> Result<SearchResult> {
+    let results_block = find_balanced_content(html, "results:[", b'[', b']').unwrap_or("");
 
     // Si no hay resultados, devolver lista vacía con paginación vacía
-    if results_block.is_empty() {
+    if results_block.trim().is_empty() {
         return Ok(SearchResult {
             animes: vec![],
             pagination: SearchPagination {
@@ -265,40 +238,20 @@ fn parse_search_results(html: &str, current_page: u32) -> Result<SearchResult> {
     })
 }
 
-/// Método de extracción alternativo para el bloque de results.
-/// Se usa cuando el patrón principal no encuentra el bloque
-/// (ej: el sitio cambió ligeramente la estructura).
-fn extract_results_block_fallback(html: &str) -> Option<&str> {
-    // Buscar la posición de `results:[` y extraer hasta `],total:`
-    let start_marker = "results:[";
-    let end_marker = "],total:";
-
-    let start = html.find(start_marker)? + start_marker.len();
-    let end = html[start..].find(end_marker).map(|i| start + i)?;
-
-    Some(&html[start..end])
-}
-
 /// Divide el bloque de resultados en objetos individuales y los parsea.
-///
-/// El bloque tiene la forma: `{...},{...},{...}`
-/// Se divide por `},{` respetando los objetos anidados.
 fn parse_anime_objects(block: &str) -> Vec<Anime> {
-    // Dividir por `},{` para separar los objetos de anime
-    // Añadir marcadores para facilitar la separación
-    let normalized = block.replace("},{", "}|||{");
-    let objects: Vec<&str> = normalized.split("|||").collect();
-
+    let objects = iter_top_level_objects(block);
     let mut animes = Vec::with_capacity(objects.len());
 
-    for obj in &objects {
+    for obj in objects {
         match parse_single_anime(obj) {
             Some(anime) => animes.push(anime),
             None => {
-                // Si falla el parseo de un objeto, continuar con el siguiente
-                // (no fallar toda la búsqueda por un resultado corrupto)
-                eprintln!("[scraper::search] advertencia: no se pudo parsear objeto: {}...",
-                    &obj[..obj.len().min(100)]);
+                // No loguear a stderr para evitar corromper la pantalla TUI
+                logger::log_warn(
+                    "scraper::search",
+                    &format!("no se pudo parsear objeto: {}...", truncate_chars(obj, 100)),
+                );
             }
         }
     }
@@ -323,26 +276,19 @@ fn parse_single_anime(obj: &str) -> Option<Anime> {
     let title = get_re_field_title()
         .captures(obj)
         .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())?;
+        .map(|m| unescape_js_string(m.as_str()))?;
 
     // — slug: tomar el primero (del anime, no de la categoría) —
     let slug = get_re_field_slug()
         .captures(obj)
         .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())?;
+        .map(|m| unescape_js_string(m.as_str()))?;
 
     // — synopsis (puede estar ausente) —
     let synopsis = get_re_field_synopsis()
         .captures(obj)
         .and_then(|c| c.get(1))
-        .map(|m| {
-            // Desescapar secuencias de escape básicas del HTML/JS
-            m.as_str()
-                .replace("\\n", "\n")
-                .replace("\\\"", "\"")
-                .replace("\\'", "'")
-                .replace("\\\\", "\\")
-        })
+        .map(|m| unescape_js_string(m.as_str()))
         .unwrap_or_default();
 
     // — categoryId —
@@ -360,8 +306,58 @@ fn parse_single_anime(obj: &str) -> Option<Anime> {
         slug,
         synopsis,
         category,
-        mal_id: None,       // Se puede extraer si se necesita
+        mal_id: None,         // Se puede extraer si se necesita
         episodes_count: None, // Se carga al navegar a la página del anime
         score: None,          // Se carga al navegar a la página del anime
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn urlencoding_encodes_utf8_bytes_properly() {
+        assert_eq!(urlencoding_simple("one piece"), "one+piece");
+        assert_eq!(urlencoding_simple("ñ"), "%C3%B1");
+        assert_eq!(urlencoding_simple("a_b-c.d~1"), "a_b-c.d~1");
+    }
+
+    #[test]
+    fn parse_handles_escaped_quotes_and_braces_in_strings() {
+        let fake_html = r#"results:[{id:"1",title:"Foo \"Bar\" Baz",synopsis:"Texto con },{ dentro",categoryId:5,slug:"foo-bar",category:{id:5,name:"ONA"}},{id:"2",title:"Segundo",synopsis:"Normal",categoryId:1,slug:"segundo",category:{id:1,name:"TV Anime"}}],totalPages:1,totalRecords:2"#;
+        let res = parse_search_results(fake_html, 1).expect("parseok");
+        assert_eq!(res.animes.len(), 2);
+        assert_eq!(res.animes[0].title, "Foo \"Bar\" Baz");
+        assert_eq!(res.animes[0].synopsis, "Texto con },{ dentro");
+        assert_eq!(res.animes[0].category, AnimeCategory::Ona);
+        assert_eq!(res.animes[1].slug, "segundo");
+    }
+
+    #[test]
+    fn parse_live_captures_in_pruebas_if_present() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("pruebas");
+        if !dir.exists() {
+            return;
+        }
+
+        let naruto = std::fs::read_to_string(dir.join("catalogo_search_naruto.html")).unwrap();
+        let res_n = parse_search_results(&naruto, 1).unwrap();
+        assert_eq!(res_n.animes.len(), 19);
+        assert!(res_n.animes.iter().any(|a| a.slug == "naruto"));
+
+        let op = std::fs::read_to_string(dir.join("catalogo_search_one_piece.html")).unwrap();
+        let res_op = parse_search_results(&op, 1).unwrap();
+        assert_eq!(res_op.animes.len(), 20);
+        assert!(res_op.animes.iter().any(|a| a.category == AnimeCategory::Ona));
+
+        let lain = std::fs::read_to_string(dir.join("catalogo_search_lain.html")).unwrap();
+        let res_l = parse_search_results(&lain, 1).unwrap();
+        assert_eq!(res_l.animes.len(), 1);
+        assert_eq!(res_l.animes[0].slug, "serial-experiments-lain");
+
+        let rezero = std::fs::read_to_string(dir.join("catalogo_search_rezero.html")).unwrap();
+        let res_r = parse_search_results(&rezero, 1).unwrap();
+        assert!(!res_r.animes.is_empty());
+    }
 }

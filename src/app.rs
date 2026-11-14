@@ -52,6 +52,8 @@ pub enum LoadingState {
     LoadingEpisodes,
     /// Cargando fuentes de video...
     LoadingSources,
+    /// Resolviendo e iniciando reproductor...
+    LaunchingPlayer,
 }
 
 impl LoadingState {
@@ -62,6 +64,7 @@ impl LoadingState {
             LoadingState::SearchingAnime => Some("Buscando anime..."),
             LoadingState::LoadingEpisodes => Some("Cargando episodios..."),
             LoadingState::LoadingSources => Some("Cargando fuentes de video..."),
+            LoadingState::LaunchingPlayer => Some("Iniciando reproductor..."),
         }
     }
 
@@ -226,15 +229,19 @@ impl App {
 
     /// Agrega un carácter al campo de búsqueda en la posición del cursor.
     pub fn input_char(&mut self, c: char) {
-        self.search_input.insert(self.cursor_position, c);
-        self.cursor_position += 1;
+        let pos = self.cursor_position.min(self.search_input.len());
+        self.search_input.insert(pos, c);
+        self.cursor_position = pos + c.len_utf8();
     }
 
     /// Elimina el carácter anterior al cursor (Backspace).
     pub fn delete_char(&mut self) {
-        if self.cursor_position > 0 {
-            self.cursor_position -= 1;
-            self.search_input.remove(self.cursor_position);
+        let pos = self.cursor_position.min(self.search_input.len());
+        if pos > 0 {
+            if let Some((prev_idx, _)) = self.search_input[..pos].char_indices().next_back() {
+                self.search_input.remove(prev_idx);
+                self.cursor_position = prev_idx;
+            }
         }
     }
 
@@ -360,12 +367,14 @@ impl App {
         self.loading = LoadingState::Idle;
         self.error_message = None;
         self.info_message = None;
-        self.selected_audio = AudioType::Sub;
+        // Seleccionar DUB automáticamente si no hay fuentes SUB disponibles
+        self.selected_audio = if self.sources.sub.is_empty() && !self.sources.dub.is_empty() {
+            AudioType::Dub
+        } else {
+            AudioType::Sub
+        };
 
-        // Seleccionar primera fuente automáticamente
-        if !self.sources.sub.is_empty() {
-            self.sources_state.select(Some(0));
-        }
+        self.select_default_source();
         self.screen = Screen::Sources;
     }
 
@@ -386,13 +395,25 @@ impl App {
             AudioType::Sub => AudioType::Dub,
             AudioType::Dub => AudioType::Sub,
         };
-        // Resetear selección al cambiar de audio
-        let len = self.sources.get(&self.selected_audio).len();
-        if len > 0 {
-            self.sources_state.select(Some(0));
-        } else {
+        self.select_default_source();
+    }
+
+    /// Prioriza automáticamente la mejor fuente compatible con mpv para el audio actual.
+    fn select_default_source(&mut self) {
+        let list = self.sources.get(&self.selected_audio);
+        if list.is_empty() {
             self.sources_state.select(None);
+            return;
         }
+        let best_idx = self
+            .sources
+            .best_for_mpv(&self.selected_audio)
+            .and_then(|best| {
+                list.iter()
+                    .position(|s| s.server == best.server && s.url == best.url)
+            })
+            .unwrap_or(0);
+        self.sources_state.select(Some(best_idx));
     }
 
     /// Avanza el frame del spinner de animación.
@@ -410,5 +431,60 @@ impl App {
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::structs::VideoSource;
+
+    #[test]
+    fn utf8_input_and_delete_do_not_panic() {
+        let mut app = App::new();
+        for c in ['ñ', 'á', 'ó', 'x'] {
+            app.input_char(c);
+        }
+        assert_eq!(app.search_input, "ñáóx");
+        app.delete_char();
+        app.delete_char();
+        assert_eq!(app.search_input, "ñá");
+        app.cursor_home();
+        app.input_char('¡');
+        assert_eq!(app.search_input, "¡ñá");
+        app.cursor_end();
+        app.input_char('!');
+        assert_eq!(app.search_input, "¡ñá!");
+    }
+
+    #[test]
+    fn set_sources_picks_dub_if_sub_empty_and_prefers_mpv_source() {
+        let mut app = App::new();
+        let ep = Episode {
+            id: 1,
+            number: 1,
+            anime_slug: "test".into(),
+        };
+        let sources = EpisodeSources {
+            sub: vec![],
+            dub: vec![
+                VideoSource {
+                    server: "UPNShare".into(),
+                    url: "https://example.com/a".into(),
+                    audio: AudioType::Dub,
+                    quality: None,
+                },
+                VideoSource {
+                    server: "HLS".into(),
+                    url: "https://player.zilla-networks.com/play/0123456789abcdef0123456789abcdef".into(),
+                    audio: AudioType::Dub,
+                    quality: None,
+                },
+            ],
+        };
+
+        app.set_sources(ep, sources);
+        assert_eq!(app.selected_audio, AudioType::Dub);
+        assert_eq!(app.sources_state.selected(), Some(1));
     }
 }

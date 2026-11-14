@@ -33,7 +33,7 @@ use crate::structs::AnimeCategory;
 use crate::ui::search::palette;
 
 /// Renderiza la pantalla de resultados de búsqueda.
-pub fn render_results(f: &mut Frame, app: &App) {
+pub fn render_results(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     // Fondo
@@ -69,7 +69,7 @@ pub fn render_results(f: &mut Frame, app: &App) {
 }
 
 /// Renderiza la lista de resultados de anime.
-fn render_results_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn render_results_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     // Título del bloque con query y total
     let query = app.last_query.as_deref().unwrap_or("");
     let total = app.search_results.len();
@@ -93,12 +93,13 @@ fn render_results_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .border_style(Style::default().fg(palette::BORDER_ACTIVE))
         .style(Style::default().bg(palette::BG));
 
-    // Construir items de la lista
+    // Construir items de la lista en bloque interno para liberar el préstamo sobre app.search_results
+    let selected_idx = app.results_state.selected();
     let items: Vec<ListItem> = app.search_results
         .iter()
         .enumerate()
         .map(|(i, anime)| {
-            let is_selected = app.results_state.selected() == Some(i);
+            let is_selected = selected_idx == Some(i);
 
             // Badge de categoría
             let (cat_text, cat_color) = match &anime.category {
@@ -106,6 +107,7 @@ fn render_results_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 AnimeCategory::Movie    => ("MOV  ", palette::ACCENT2),
                 AnimeCategory::Ova      => (" OVA ", palette::SUCCESS),
                 AnimeCategory::Special  => (" ESP ", palette::WARNING),
+                AnimeCategory::Ona      => (" ONA ", palette::HIGHLIGHT),
                 AnimeCategory::Unknown(_) => ("  ?  ", palette::TEXT_DIM),
             };
 
@@ -151,10 +153,7 @@ fn render_results_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .collect();
 
     let list = List::new(items).block(block);
-
-    // Necesitamos mutable state para renderizar la lista con selección
-    let mut state = app.results_state.clone();
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, area, &mut app.results_state);
 }
 
 /// Renderiza el panel de sinopsis del anime seleccionado.

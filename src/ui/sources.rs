@@ -33,7 +33,7 @@ use crate::structs::AudioType;
 use crate::ui::search::palette;
 
 /// Renderiza la pantalla de selección de fuentes de video.
-pub fn render_sources(f: &mut Frame, app: &App) {
+pub fn render_sources(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     // Fondo
@@ -142,9 +142,7 @@ fn render_audio_tabs(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 /// Renderiza la lista de servidores de video disponibles.
-fn render_servers_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let sources = app.sources.get(&app.selected_audio);
-
+fn render_servers_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let audio_label = app.selected_audio.display();
     let audio_color = match app.selected_audio {
         AudioType::Sub => palette::SUB_COLOR,
@@ -168,76 +166,76 @@ fn render_servers_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .border_style(Style::default().fg(palette::BORDER_ACTIVE))
         .style(Style::default().bg(palette::BG));
 
-    if sources.is_empty() {
-        let empty = Paragraph::new(Line::from(Span::styled(
-            "  No hay fuentes disponibles para este tipo de audio",
-            Style::default()
-                .fg(palette::TEXT_DIM)
-                .add_modifier(Modifier::ITALIC),
-        )))
-        .block(block);
-        f.render_widget(empty, area);
-        return;
-    }
-
-    // Determinar qué servidores son compatibles con mpv
-    let mpv_available = app.player_info.mpv_available;
-
-    let items: Vec<ListItem> = sources
-        .iter()
-        .enumerate()
-        .map(|(i, source)| {
-            let is_selected = app.sources_state.selected() == Some(i);
-
-            // Indicador de compatibilidad con mpv o navegador
-            let (player_icon, player_color) = if source.is_mpv_compatible() && mpv_available {
-                ("🎬 mpv", palette::SUCCESS)
-            } else if source.is_mpv_compatible() {
-                ("🌐 web", palette::WARNING) // mpv compatible pero no instalado
-            } else {
-                ("🌐 web", palette::ACCENT2)
-            };
-
-            // URL truncada para mostrar
-            let url_display = truncate_url(&source.url, 55);
-            let prefix = if is_selected { "▶ " } else { "  " };
-
-            let line = Line::from(vec![
-                Span::styled(
-                    prefix,
-                    Style::default().fg(if is_selected { palette::HIGHLIGHT } else { palette::BG }),
-                ),
-                Span::styled(
-                    format!("[{}]", player_icon),
-                    Style::default().fg(player_color).add_modifier(Modifier::DIM),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    format!("{:<12}", &source.server),
-                    Style::default()
-                        .fg(if is_selected { palette::HIGHLIGHT } else { palette::ACCENT })
-                        .add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() }),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    url_display,
-                    Style::default().fg(palette::TEXT_DIM),
-                ),
-            ]);
-
-            let style = if is_selected {
-                Style::default().bg(Color::Rgb(15, 30, 50))
-            } else {
+    let items: Vec<ListItem> = {
+        let sources = app.sources.get(&app.selected_audio);
+        if sources.is_empty() {
+            let empty = Paragraph::new(Line::from(Span::styled(
+                "  No hay fuentes disponibles para este tipo de audio",
                 Style::default()
-            };
+                    .fg(palette::TEXT_DIM)
+                    .add_modifier(Modifier::ITALIC),
+            )))
+            .block(block);
+            f.render_widget(empty, area);
+            return;
+        }
 
-            ListItem::new(line).style(style)
-        })
-        .collect();
+        let mpv_available = app.player_info.mpv_available;
+        let selected_idx = app.sources_state.selected();
+
+        sources
+            .iter()
+            .enumerate()
+            .map(|(i, source)| {
+                let is_selected = selected_idx == Some(i);
+
+                let (player_icon, player_color) = if source.is_mpv_compatible() && mpv_available {
+                    ("🎬 mpv", palette::SUCCESS)
+                } else if source.is_mpv_compatible() {
+                    ("🌐 web", palette::WARNING) // mpv compatible pero no instalado
+                } else {
+                    ("🌐 web", palette::ACCENT2)
+                };
+
+                let url_display = truncate_url(&source.url, 55);
+                let prefix = if is_selected { "▶ " } else { "  " };
+
+                let line = Line::from(vec![
+                    Span::styled(
+                        prefix,
+                        Style::default().fg(if is_selected { palette::HIGHLIGHT } else { palette::BG }),
+                    ),
+                    Span::styled(
+                        format!("[{}]", player_icon),
+                        Style::default().fg(player_color).add_modifier(Modifier::DIM),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        format!("{:<12}", source.server),
+                        Style::default()
+                            .fg(if is_selected { palette::HIGHLIGHT } else { palette::ACCENT })
+                            .add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() }),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        url_display,
+                        Style::default().fg(palette::TEXT_DIM),
+                    ),
+                ]);
+
+                let style = if is_selected {
+                    Style::default().bg(Color::Rgb(15, 30, 50))
+                } else {
+                    Style::default()
+                };
+
+                ListItem::new(line).style(style)
+            })
+            .collect()
+    };
 
     let list = List::new(items).block(block);
-    let mut state = app.sources_state.clone();
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, area, &mut app.sources_state);
 }
 
 /// Renderiza información detallada sobre la fuente seleccionada.
@@ -308,20 +306,22 @@ fn render_sources_keybindings(f: &mut Frame, area: ratatui::layout::Rect) {
     f.render_widget(keybindings, area);
 }
 
-/// Trunca una URL para mostrarla en la lista, preservando el dominio.
+/// Trunca una URL para mostrarla en la lista en límites UTF-8 seguros.
 fn truncate_url(url: &str, max_len: usize) -> String {
-    if url.len() <= max_len {
+    if url.chars().count() <= max_len {
         return url.to_string();
     }
 
-    // Intentar mostrar dominio + inicio + "..."
     let without_scheme = url
         .trim_start_matches("https://")
         .trim_start_matches("http://");
 
-    if without_scheme.len() <= max_len {
+    if without_scheme.chars().count() <= max_len {
         return without_scheme.to_string();
     }
 
-    format!("{}…", &without_scheme[..max_len - 1])
+    format!(
+        "{}…",
+        crate::structs::truncate_chars(without_scheme, max_len.saturating_sub(1))
+    )
 }

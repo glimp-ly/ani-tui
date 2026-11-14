@@ -109,19 +109,18 @@ pub fn render_search(f: &mut Frame, app: &App) {
     render_search_input(f, app, h_layout[1]);
 
     // — Estado del reproductor —
-    let player_line = if app.player_info.mpv_available {
-        Line::from(vec![
-            Span::styled("●  ", Style::default().fg(palette::SUCCESS)),
-            Span::styled("mpv disponible — reproducción directa sin anuncios",
-                Style::default().fg(palette::TEXT_DIM)),
-        ])
+    let indicator_color = if app.player_info.mpv_available {
+        palette::SUCCESS
     } else {
-        Line::from(vec![
-            Span::styled("●  ", Style::default().fg(palette::WARNING)),
-            Span::styled("mpv no encontrado — se usará el navegador del sistema",
-                Style::default().fg(palette::TEXT_DIM)),
-        ])
+        palette::WARNING
     };
+    let player_line = Line::from(vec![
+        Span::styled("●  ", Style::default().fg(indicator_color)),
+        Span::styled(
+            app.player_info.status_line(),
+            Style::default().fg(palette::TEXT_DIM),
+        ),
+    ]);
 
     let player_status = Paragraph::new(player_line).alignment(Alignment::Center);
     f.render_widget(player_status, vertical[5]);
@@ -195,26 +194,31 @@ fn render_search_input(f: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(palette::BG));
 
-    // Mostrar input con cursor
-    let display_text = format!("{}_", &app.search_input);
+    // Mostrar input con el cursor ubicado en app.cursor_position
+    let pos = app.cursor_position.min(app.search_input.len());
+    let split = if app.search_input.is_char_boundary(pos) {
+        pos
+    } else {
+        app.search_input.len()
+    };
+    let (before_cursor, after_cursor) = app.search_input.split_at(split);
+    let input_style = Style::default()
+        .fg(palette::TEXT)
+        .add_modifier(Modifier::BOLD);
+
     let input = Paragraph::new(Line::from(vec![
         Span::styled("> ", Style::default().fg(palette::ACCENT)),
-        Span::styled(
-            &app.search_input,
-            Style::default()
-                .fg(palette::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(before_cursor, input_style),
         Span::styled(
             if is_active { "█" } else { "" },
             Style::default()
                 .fg(palette::ACCENT)
                 .add_modifier(Modifier::SLOW_BLINK),
         ),
+        Span::styled(after_cursor, input_style),
     ]))
     .block(block);
 
-    let _ = display_text; // usado para debug
     f.render_widget(input, area);
 }
 
@@ -247,9 +251,9 @@ pub fn key_span(key: &str) -> Span<'static> {
 
 /// Renderiza un overlay de carga sobre la pantalla actual.
 pub fn render_loading_overlay(f: &mut Frame, area: Rect, spinner: char, msg: &str) {
-    // Calcular área centrada para el overlay
-    let width = (msg.len() as u16 + 8).min(area.width - 4);
-    let height = 3u16;
+    let max_w = area.width.saturating_sub(4).max(12);
+    let width = (msg.chars().count() as u16 + 8).min(max_w);
+    let height = 3u16.min(area.height);
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
 
@@ -278,96 +282,62 @@ pub fn render_loading_overlay(f: &mut Frame, area: Rect, spinner: char, msg: &st
 
 /// Renderiza un overlay de error sobre la pantalla actual.
 pub fn render_error_overlay(f: &mut Frame, area: Rect, message: &str) {
-    let lines: Vec<&str> = message.lines().collect();
-    let max_width = lines.iter().map(|l| l.len()).max().unwrap_or(20);
-    let width = (max_width as u16 + 6).min(area.width - 4).max(30);
-    let height = (lines.len() as u16 + 4).min(area.height - 4);
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-
-    let overlay_area = Rect::new(area.x + x, area.y + y, width, height);
-    f.render_widget(Clear, overlay_area);
-
-    let error_text: Vec<Line> = std::iter::once(
-        Line::from(Span::styled(
-            "⚠ Error",
-            Style::default()
-                .fg(palette::ERROR)
-                .add_modifier(Modifier::BOLD),
-        ))
-    )
-    .chain(
-        lines.iter().map(|l| {
-            Line::from(Span::styled(*l, Style::default().fg(palette::TEXT)))
-        })
-    )
-    .chain(std::iter::once(
-        Line::from(Span::styled(
-            "Presiona cualquier tecla para continuar",
-            Style::default()
-                .fg(palette::TEXT_DIM)
-                .add_modifier(Modifier::ITALIC),
-        ))
-    ))
-    .collect();
-
-    let error_widget = Paragraph::new(error_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Double)
-                .border_style(Style::default().fg(palette::ERROR))
-                .style(Style::default().bg(palette::BG)),
-        )
-        .alignment(Alignment::Center);
-
-    f.render_widget(error_widget, overlay_area);
+    render_message_overlay(f, area, "⚠ Error", palette::ERROR, message);
 }
 
 /// Renderiza un overlay informativo (no de error) sobre la pantalla actual.
 pub fn render_info_overlay(f: &mut Frame, area: Rect, message: &str) {
+    render_message_overlay(f, area, "ℹ Info", palette::ACCENT, message);
+}
+
+/// Renderiza un overlay modal centrado con título y color de borde configurables.
+fn render_message_overlay(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    accent_color: Color,
+    message: &str,
+) {
     let lines: Vec<&str> = message.lines().collect();
-    let max_width = lines.iter().map(|l| l.len()).max().unwrap_or(20);
-    let width = (max_width as u16 + 6).min(area.width - 4).max(30);
-    let height = (lines.len() as u16 + 4).min(area.height - 4);
+    let max_line_chars = lines.iter().map(|l| l.chars().count()).max().unwrap_or(20);
+    let max_w = area.width.saturating_sub(4).max(12);
+    let max_h = area.height.saturating_sub(4).max(5);
+    let width = (max_line_chars as u16 + 6).min(max_w).max(30.min(max_w));
+    let height = (lines.len() as u16 + 4).min(max_h);
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
 
     let overlay_area = Rect::new(area.x + x, area.y + y, width, height);
     f.render_widget(Clear, overlay_area);
 
-    let info_text: Vec<Line> = std::iter::once(
-        Line::from(Span::styled(
-            "ℹ Info",
-            Style::default()
-                .fg(palette::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ))
-    )
+    let text: Vec<Line> = std::iter::once(Line::from(Span::styled(
+        title,
+        Style::default()
+            .fg(accent_color)
+            .add_modifier(Modifier::BOLD),
+    )))
     .chain(
-        lines.iter().map(|l| {
-            Line::from(Span::styled(*l, Style::default().fg(palette::TEXT)))
-        })
+        lines
+            .iter()
+            .map(|l| Line::from(Span::styled(*l, Style::default().fg(palette::TEXT)))),
     )
-    .chain(std::iter::once(
-        Line::from(Span::styled(
-            "Presiona cualquier tecla para continuar",
-            Style::default()
-                .fg(palette::TEXT_DIM)
-                .add_modifier(Modifier::ITALIC),
-        ))
-    ))
+    .chain(std::iter::once(Line::from(Span::styled(
+        "Presiona cualquier tecla para continuar",
+        Style::default()
+            .fg(palette::TEXT_DIM)
+            .add_modifier(Modifier::ITALIC),
+    ))))
     .collect();
 
-    let info_widget = Paragraph::new(info_text)
+    let widget = Paragraph::new(text)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Double)
-                .border_style(Style::default().fg(palette::ACCENT))
+                .border_style(Style::default().fg(accent_color))
                 .style(Style::default().bg(palette::BG)),
         )
         .alignment(Alignment::Center);
 
-    f.render_widget(info_widget, overlay_area);
+    f.render_widget(widget, overlay_area);
 }

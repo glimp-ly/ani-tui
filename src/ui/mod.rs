@@ -30,7 +30,7 @@ use crate::app::{App, Screen};
 /// actual de la aplicación (`app.screen`).
 ///
 /// Esta función se llama en cada ciclo del event loop.
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &mut App) {
     match app.screen {
         Screen::Search => search::render_search(f, app),
         Screen::Results => results::render_results(f, app),

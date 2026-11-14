@@ -158,7 +158,7 @@ async fn run_tui() -> Result<()> {
     // ————————————————————————————————
     loop {
         // — Renderizar UI —
-        terminal.draw(|f| ui::render(f, &app))?;
+        terminal.draw(|f| ui::render(f, &mut app))?;
 
         // — Procesar mensajes de tareas asíncronas (no bloqueante) —
         while let Ok(event) = rx.try_recv() {
@@ -202,7 +202,7 @@ async fn run_tui() -> Result<()> {
                     ).await,
 
                     Screen::Sources => handle_sources_input(
-                        &mut app, key.code
+                        &mut app, key.code, &tx
                     ),
 
                     Screen::Help => {
@@ -260,6 +260,8 @@ enum AppEvent {
         episode: structs::Episode,
         sources: structs::EpisodeSources,
     },
+    /// Resultado de lanzar reproducción en mpv o navegador
+    PlayFinished(player::PlayResult),
     /// Error en una operación asíncrona
     Error(String),
 }
@@ -283,6 +285,31 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
         }
         AppEvent::SourcesLoaded { episode, sources } => {
             app.set_sources(episode, sources);
+        }
+        AppEvent::PlayFinished(result) => {
+            app.loading = app::LoadingState::Idle;
+            match result {
+                player::PlayResult::LaunchedMpv { ref url } => {
+                    logger::log_info(
+                        "tui",
+                        &format!("mpv lanzado: {}", structs::truncate_chars(url, 50)),
+                    );
+                    app.set_info(result.display_message());
+                }
+                player::PlayResult::LaunchedBrowser { ref url } => {
+                    logger::log_info(
+                        "tui",
+                        &format!("Navegador abierto: {}", structs::truncate_chars(url, 50)),
+                    );
+                    app.set_info(result.display_message());
+                }
+                player::PlayResult::NoSources => {
+                    app.set_error("No hay fuentes disponibles para este audio".to_string());
+                }
+                player::PlayResult::Error(ref e) => {
+                    app.set_error(format!("Error al reproducir: {}", e));
+                }
+            }
         }
         AppEvent::Error(msg) => {
             app.set_error(msg);
@@ -484,7 +511,11 @@ async fn trigger_load_sources(
 }
 
 /// Maneja el input de teclado en la pantalla de fuentes de video.
-fn handle_sources_input(app: &mut App, code: KeyCode) {
+fn handle_sources_input(
+    app: &mut App,
+    code: KeyCode,
+    tx: &UnboundedSender<AppEvent>,
+) {
     match code {
         KeyCode::Esc => app.go_back(),
         KeyCode::Up | KeyCode::Char('k') => app.list_up(),
@@ -505,33 +536,21 @@ fn handle_sources_input(app: &mut App, code: KeyCode) {
                 app.toggle_audio();
             }
         }
-        // Reproducir la fuente seleccionada (async: resolver URL + mpv/browser)
+        // Reproducir la fuente seleccionada sin bloquear el event loop de la TUI
         KeyCode::Enter => {
-            let sources = app.sources.get(&app.selected_audio).to_vec();
+            let sources = app.sources.get(&app.selected_audio);
+            if sources.is_empty() {
+                let _ = tx.send(AppEvent::PlayFinished(player::PlayResult::NoSources));
+                return;
+            }
             if let Some(idx) = app.sources_state.selected() {
                 if let Some(source) = sources.get(idx).cloned() {
-                    // Usar la versión que resuelve la URL primero
-                    let result = player::play_source(&source);
-                    match result {
-                        player::PlayResult::LaunchedMpv { ref url } => {
-                            logger::log_info("tui", &format!("mpv lanzado: {}", &url[..url.len().min(50)]));
-                        }
-                        player::PlayResult::LaunchedBrowser { .. } => {
-                            logger::log_info("tui", "Navegador abierto");
-                        }
-                        player::PlayResult::NoSources => {
-                            app.set_error("No hay fuentes disponibles".to_string());
-                        }
-                        player::PlayResult::Error(ref e) => {
-                            app.set_error(format!("Error al reproducir: {}", e));
-                        }
-                    }
-                    // Mostrar mensaje de estado en la TUI
-                    let msg = result.display_message();
-                    // Los errores ya están establecidos arriba; el lanzamiento exitoso muestra info
-                    if !matches!(result, player::PlayResult::Error(_) | player::PlayResult::NoSources) {
-                        app.set_info(msg);
-                    }
+                    app.loading = app::LoadingState::LaunchingPlayer;
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let result = player::play_source_async(&source).await;
+                        let _ = tx.send(AppEvent::PlayFinished(result));
+                    });
                 }
             }
         }
@@ -567,8 +586,9 @@ async fn run_search_plain(query: &str, page: u32) -> Result<()> {
                 if !anime.synopsis.is_empty() {
                     // Mostrar primer párrafo de la sinopsis
                     let first_line = anime.synopsis.lines().next().unwrap_or("");
-                    let truncated = if first_line.len() > 80 {
-                        format!("{}...", &first_line[..80])
+                    let truncated_slice = structs::truncate_chars(first_line, 80);
+                    let truncated = if truncated_slice.len() < first_line.len() {
+                        format!("{}...", truncated_slice)
                     } else {
                         first_line.to_string()
                     };
@@ -603,7 +623,8 @@ async fn run_serve(port: u16) -> Result<()> {
 
     let app = routes::create_routes().layer(cors);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let ip: std::net::IpAddr = config::SERVE_ADDR.parse()?;
+    let addr = SocketAddr::new(ip, port);
     let listener = TcpListener::bind(addr).await?;
     println!("🚀 API REST iniciada en http://{}", addr);
     println!("   Endpoints:");

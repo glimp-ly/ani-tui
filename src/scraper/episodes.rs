@@ -12,23 +12,20 @@
 // que enriquecen la información mostrada en la TUI.
 // ============================================================
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use regex::Regex;
 use std::sync::OnceLock;
 
 use crate::config::BASE_URL;
 use crate::logger;
-use crate::scraper::client::build_client;
+use crate::scraper::client::fetch_html;
+use crate::scraper::find_balanced_content;
 use crate::security;
 use crate::structs::{Anime, AnimeCategory, Episode};
 
 // ————————————————————————————————————————————————
 // Patrones regex
 // ————————————————————————————————————————————————
-
-/// Extrae el array de episodios del HTML.
-/// Formato: episodes:[{id:N,number:M},{id:N2,number:M2},...]
-static RE_EPISODES_BLOCK: OnceLock<Regex> = OnceLock::new();
 
 /// Extrae cada par id/number del bloque de episodios.
 static RE_EPISODE_ENTRY: OnceLock<Regex> = OnceLock::new();
@@ -39,27 +36,17 @@ static RE_EPISODES_COUNT: OnceLock<Regex> = OnceLock::new();
 /// Extrae la puntuación del anime.
 static RE_SCORE: OnceLock<Regex> = OnceLock::new();
 
-/// Extrae el slug del anime desde el HTML de la página.
-static RE_SLUG: OnceLock<Regex> = OnceLock::new();
-
 /// Extrae el nombre de la categoría del anime.
 static RE_CATEGORY_NAME: OnceLock<Regex> = OnceLock::new();
 
 /// Extrae el ID de MAL.
 static RE_MAL_ID: OnceLock<Regex> = OnceLock::new();
 
-fn get_re_episodes_block() -> &'static Regex {
-    RE_EPISODES_BLOCK.get_or_init(|| {
-        // Captura el contenido entre episodes:[ y el primer ] fuera del bloque
-        // El bloque puede ser muy largo (One Piece tiene 1166 episodios)
-        Regex::new(r"episodes:\[(\{[^]]+\})\]").expect("regex episodes_block inválida")
-    })
-}
-
 fn get_re_episode_entry() -> &'static Regex {
     RE_EPISODE_ENTRY.get_or_init(|| {
-        // Captura {id:3433,number:1} — enteros, sin comillas
-        Regex::new(r"\{id:(\d+),number:(\d+)\}").expect("regex episode_entry inválida")
+        // Captura {id:3433,number:1} tolerando espacios o campos adicionales
+        Regex::new(r"\{[^}]*?\bid:(\d+)[^}]*?\bnumber:(\d+)[^}]*?\}")
+            .expect("regex episode_entry inválida")
     })
 }
 
@@ -72,13 +59,6 @@ fn get_re_episodes_count() -> &'static Regex {
 fn get_re_score() -> &'static Regex {
     RE_SCORE.get_or_init(|| {
         Regex::new(r"score:([\d.]+)").expect("regex score inválida")
-    })
-}
-
-fn get_re_slug() -> &'static Regex {
-    RE_SLUG.get_or_init(|| {
-        // El primer slug encontrado es el del anime
-        Regex::new(r#"slug:"([^"]+)""#).expect("regex slug inválida")
     })
 }
 
@@ -119,26 +99,7 @@ fn get_re_mal_id() -> &'static Regex {
 /// println!("{} tiene {} episodios", anime.title, episodes.len());
 /// ```
 pub async fn get_episodes(anime: &mut Anime) -> Result<Vec<Episode>> {
-    // SEGURIDAD: validar el slug antes de construir la URL
-    security::validate_anime_slug(&anime.slug)
-        .map_err(|e| anyhow::anyhow!("Slug inválido: {}", e))?;
-
-    let client = build_client().context("Error al inicializar cliente HTTP")?;
-
-    let url = format!("{}/media/{}", BASE_URL, anime.slug);
-    logger::log_net("GET", &url, "solicitando episodios...");
-
-    let html = client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("Error al conectar con: {}", url))?
-        .text()
-        .await
-        .context("Error al leer respuesta del servidor")?;
-
-    // Parsear episodios y metadatos del HTML
-    let (episodes, metadata) = parse_episodes_from_html(&html, &anime.slug)?;
+    let (episodes, metadata) = get_episodes_by_slug(&anime.slug).await?;
 
     // Enriquecer el anime con los metadatos encontrados
     if let Some(count) = metadata.episodes_count {
@@ -146,6 +107,14 @@ pub async fn get_episodes(anime: &mut Anime) -> Result<Vec<Episode>> {
     }
     if let Some(score) = metadata.score {
         anime.score = Some(score);
+    }
+    if let Some(mal_id) = metadata.mal_id {
+        anime.mal_id = Some(mal_id);
+    }
+    if matches!(anime.category, AnimeCategory::Unknown(_)) {
+        if let Some(cat) = metadata.category {
+            anime.category = cat;
+        }
     }
 
     Ok(episodes)
@@ -164,20 +133,10 @@ pub async fn get_episodes_by_slug(slug: &str) -> Result<(Vec<Episode>, AnimeMeta
     security::validate_anime_slug(slug)
         .map_err(|e| anyhow::anyhow!("Slug inválido: {}", e))?;
 
-    let client = build_client().context("Error al inicializar cliente HTTP")?;
-
     let url = format!("{}/media/{}", BASE_URL, slug);
-    logger::log_net("GET", &url, "solicitando episodios por slug...");
+    logger::log_net("GET", &url, "solicitando episodios...");
 
-    let html = client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("Error al conectar con: {}", url))?
-        .text()
-        .await
-        .context("Error al leer respuesta del servidor")?;
-
+    let html = fetch_html(&url).await?;
     parse_episodes_from_html(&html, slug)
 }
 
@@ -203,24 +162,18 @@ pub struct AnimeMetadata {
 // ————————————————————————————————————————————————
 
 /// Parsea el HTML de la página de un anime para extraer episodios y metadatos.
-fn parse_episodes_from_html(
+pub fn parse_episodes_from_html(
     html: &str,
     anime_slug: &str,
 ) -> Result<(Vec<Episode>, AnimeMetadata)> {
     // — Extraer metadatos del anime —
     let metadata = extract_anime_metadata(html);
 
-    // — Extraer bloque de episodios —
-    let episodes_block = get_re_episodes_block()
-        .captures(html)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str())
-        .or_else(|| extract_episodes_block_fallback(html))
-        .unwrap_or("");
+    // — Extraer bloque de episodios de forma balanceada —
+    let episodes_block = find_balanced_content(html, "episodes:[", b'[', b']').unwrap_or("");
 
-    if episodes_block.is_empty() {
-        // Si no se encontraron episodios, puede ser un error del sitio
-        // o un anime sin episodios disponibles aún
+    if episodes_block.trim().is_empty() {
+        // Si no se encontraron episodios, puede ser un anime sin episodios aún
         return Ok((vec![], metadata));
     }
 
@@ -275,34 +228,51 @@ fn extract_anime_metadata(html: &str) -> AnimeMetadata {
     }
 }
 
-/// Método de extracción alternativo para el bloque de episodios.
-/// Se usa cuando el bloque es demasiado largo para la regex estándar.
-fn extract_episodes_block_fallback(html: &str) -> Option<&str> {
-    let start_marker = "episodes:[";
-    let start = html.find(start_marker)? + start_marker.len();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // Encontrar el cierre del array contando corchetes
-    let mut depth = 1i32;
-    let mut end = start;
-    let bytes = html[start..].as_bytes();
-
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = start + i;
-                    break;
-                }
-            }
-            _ => {}
-        }
+    #[test]
+    fn parse_episodes_fixture_sorts_and_extracts_metadata() {
+        let html = r#"category:{id:5,name:"ONA"},episodesCount:2,score:8.9,malId:42,episodes:[{id:20,number:2},{id:10,number:1}]"#;
+        let (eps, meta) = parse_episodes_from_html(html, "demo-anime").unwrap();
+        assert_eq!(eps.len(), 2);
+        assert_eq!(eps[0].number, 1);
+        assert_eq!(eps[1].number, 2);
+        assert_eq!(meta.episodes_count, Some(2));
+        assert_eq!(meta.score, Some(8.9));
+        assert_eq!(meta.mal_id, Some(42));
+        assert_eq!(meta.category, Some(AnimeCategory::Ona));
     }
 
-    if end > start {
-        Some(&html[start..end])
-    } else {
-        None
+    #[test]
+    fn parse_live_episodes_in_pruebas_if_present() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("pruebas");
+        if !dir.exists() {
+            return;
+        }
+
+        let naruto_html = std::fs::read_to_string(dir.join("media_naruto.html")).unwrap();
+        let (eps_n, meta_n) = parse_episodes_from_html(&naruto_html, "naruto").unwrap();
+        assert_eq!(eps_n.len(), 220);
+        assert_eq!(eps_n[0].number, 1);
+        assert_eq!(eps_n[219].number, 220);
+        assert!(meta_n.score.is_some());
+
+        let op_html = std::fs::read_to_string(dir.join("media_one_piece.html")).unwrap();
+        let (eps_op, meta_op) = parse_episodes_from_html(&op_html, "one-piece").unwrap();
+        assert!(eps_op.len() >= 1150, "esperados >=1150 episodios, got {}", eps_op.len());
+        assert_eq!(eps_op[0].number, 1);
+        assert!(eps_op.windows(2).all(|w| w[0].number <= w[1].number));
+        assert!(meta_op.episodes_count.is_some());
+
+        let lain_html = std::fs::read_to_string(dir.join("media_serial_experiments_lain.html")).unwrap();
+        let (eps_l, _) = parse_episodes_from_html(&lain_html, "serial-experiments-lain").unwrap();
+        assert_eq!(eps_l.len(), 13);
+
+        let rezero_html = std::fs::read_to_string(dir.join("media_rezero4.html")).unwrap();
+        let (eps_rz, _) = parse_episodes_from_html(&rezero_html, "rezero4").unwrap();
+        assert!(!eps_rz.is_empty());
+        assert_eq!(eps_rz[0].number, 1);
     }
 }

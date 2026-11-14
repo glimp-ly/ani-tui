@@ -24,6 +24,8 @@ pub enum AnimeCategory {
     Ova,
     /// Episodio especial (categoryId: 4)
     Special,
+    /// Original Net Animation (categoryId: 5)
+    Ona,
     /// Categoría no reconocida
     Unknown(String),
 }
@@ -36,6 +38,7 @@ impl AnimeCategory {
             2 => AnimeCategory::Movie,
             3 => AnimeCategory::Ova,
             4 => AnimeCategory::Special,
+            5 => AnimeCategory::Ona,
             _ => AnimeCategory::Unknown(id.to_string()),
         }
     }
@@ -47,6 +50,7 @@ impl AnimeCategory {
             "Movie" | "movie"       => AnimeCategory::Movie,
             "OVA" | "ova"           => AnimeCategory::Ova,
             "Special" | "special"   => AnimeCategory::Special,
+            "ONA" | "ona"           => AnimeCategory::Ona,
             other                   => AnimeCategory::Unknown(other.to_string()),
         }
     }
@@ -58,6 +62,7 @@ impl AnimeCategory {
             AnimeCategory::Movie          => "Movie",
             AnimeCategory::Ova            => "OVA",
             AnimeCategory::Special        => "Especial",
+            AnimeCategory::Ona            => "ONA",
             AnimeCategory::Unknown(_)     => "?",
         }
     }
@@ -123,12 +128,6 @@ pub struct Episode {
 }
 
 impl Episode {
-    /// Construye la URL completa de la página del episodio.
-    /// Formato: /media/{anime_slug}/{number}
-    pub fn page_url(&self, base: &str) -> String {
-        format!("{}/media/{}/{}", base, self.anime_slug, self.number)
-    }
-
     /// Título de visualización en la TUI.
     pub fn display_title(&self) -> String {
         format!("Episodio {}", self.number)
@@ -176,10 +175,12 @@ pub struct VideoSource {
 }
 
 impl VideoSource {
-    /// Indica si esta fuente es compatible con mpv sin configuración adicional.
-    /// El servidor HLS y PDrain (PixelDrain) son los más compatibles.
+    /// Indica si esta fuente tiene soporte de resolución para reproducción en mpv.
     pub fn is_mpv_compatible(&self) -> bool {
-        matches!(self.server.as_str(), "HLS" | "PDrain")
+        matches!(
+            self.server.as_str(),
+            "HLS" | "MP4Upload" | "YourUpload" | "PDrain"
+        )
     }
 }
 
@@ -215,6 +216,83 @@ impl EpisodeSources {
         sources
             .iter()
             .find(|s| s.server == "HLS")
+            .or_else(|| sources.iter().find(|s| s.server == "MP4Upload"))
+            .or_else(|| sources.iter().find(|s| s.server == "YourUpload"))
             .or_else(|| sources.iter().find(|s| s.server == "PDrain"))
+    }
+}
+
+/// Trunca una cadena de forma segura en límites de caracteres UTF-8.
+pub fn truncate_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_source(server: &str, audio: AudioType) -> VideoSource {
+        VideoSource {
+            server: server.to_string(),
+            url: format!("https://example.com/{}", server),
+            audio,
+            quality: None,
+        }
+    }
+
+    #[test]
+    fn category_maps_ona_and_known_ids() {
+        assert_eq!(AnimeCategory::from_id(1), AnimeCategory::TvAnime);
+        assert_eq!(AnimeCategory::from_id(2), AnimeCategory::Movie);
+        assert_eq!(AnimeCategory::from_id(3), AnimeCategory::Ova);
+        assert_eq!(AnimeCategory::from_id(4), AnimeCategory::Special);
+        assert_eq!(AnimeCategory::from_id(5), AnimeCategory::Ona);
+        assert_eq!(AnimeCategory::Ona.display(), "ONA");
+        assert_eq!(AnimeCategory::from_name("ONA"), AnimeCategory::Ona);
+        assert_eq!(AnimeCategory::from_id(99), AnimeCategory::Unknown("99".into()));
+    }
+
+    #[test]
+    fn truncate_chars_is_utf8_safe() {
+        let text = "Canción ñandú 日本語";
+        assert_eq!(truncate_chars(text, 0), "");
+        assert_eq!(truncate_chars(text, 7), "Canción");
+        assert_eq!(truncate_chars(text, 10), "Canción ña");
+        assert_eq!(truncate_chars(text, 100), text);
+    }
+
+    #[test]
+    fn video_source_compatibility_and_priority() {
+        assert!(make_source("HLS", AudioType::Sub).is_mpv_compatible());
+        assert!(make_source("MP4Upload", AudioType::Sub).is_mpv_compatible());
+        assert!(make_source("YourUpload", AudioType::Sub).is_mpv_compatible());
+        assert!(make_source("PDrain", AudioType::Sub).is_mpv_compatible());
+        assert!(!make_source("UPNShare", AudioType::Sub).is_mpv_compatible());
+        assert!(!make_source("Mega", AudioType::Sub).is_mpv_compatible());
+
+        let sources = EpisodeSources {
+            sub: vec![
+                make_source("UPNShare", AudioType::Sub),
+                make_source("YourUpload", AudioType::Sub),
+                make_source("MP4Upload", AudioType::Sub),
+                make_source("HLS", AudioType::Sub),
+            ],
+            dub: vec![
+                make_source("YourUpload", AudioType::Dub),
+                make_source("PDrain", AudioType::Dub),
+            ],
+        };
+
+        assert_eq!(
+            sources.best_for_mpv(&AudioType::Sub).map(|s| s.server.as_str()),
+            Some("HLS")
+        );
+        assert_eq!(
+            sources.best_for_mpv(&AudioType::Dub).map(|s| s.server.as_str()),
+            Some("YourUpload")
+        );
     }
 }

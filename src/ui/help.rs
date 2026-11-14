@@ -105,8 +105,8 @@ fn build_help_text() -> Vec<Line<'static>> {
 
         // — Reproductores —
         section_title("▶  Reproducción"),
-        key_help("HLS / PDrain", "Compatible con mpv directamente (sin anuncios)"),
-        key_help("Mega / MP4Upload", "Se abre en el navegador del sistema"),
+        key_help("HLS / MP4Upload", "Reproduce en mpv directo (+ YourUpload / PDrain)"),
+        key_help("Mega / UPNShare", "Se abre en el navegador del sistema"),
         key_help("mpv", "Se lanza en background, la TUI sigue activa"),
     ]
 }

@@ -266,8 +266,9 @@ fn sanitize_for_log(s: &str, max_len: usize) -> String {
         .filter(|c| !c.is_control() || *c == '\t')
         .collect();
 
-    if clean.len() > max_len {
-        format!("{}...[truncado]", &clean[..max_len])
+    let truncated = crate::structs::truncate_chars(&clean, max_len);
+    if truncated.len() < clean.len() {
+        format!("{}...[truncado]", truncated)
     } else {
         clean
     }

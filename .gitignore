@@ -4,3 +4,6 @@ Cargo.lock
 *.html
 bin/
 *.zip
+
+graphify-out/
+pruebas/
