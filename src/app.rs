@@ -12,10 +12,27 @@
 // - Los eventos de input modifican el estado
 // ============================================================
 
-use ratatui::widgets::ListState;
+use std::time::{Duration, Instant};
 
-use crate::structs::{Anime, AudioType, Episode, EpisodeSources};
+use image::DynamicImage;
+use ratatui::widgets::ListState;
+use ratatui_image::{
+    picker::{Picker, ProtocolType},
+    thread::{ResizeRequest, ResizeResponse, ThreadProtocol},
+};
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::cover::{self, CoverCache, CoverEntry};
 use crate::player::PlayerInfo;
+use crate::structs::{Anime, AudioType, Episode, EpisodeSources};
+
+/// Estado visual de la portada activa para decidir qué dibujar en el panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverDisplayState {
+    Unavailable,
+    Loading,
+    Ready { frame_encoded: bool },
+}
 
 // ————————————————————————————————————————————————
 // Pantallas disponibles en la TUI
@@ -152,11 +169,32 @@ pub struct App {
 
     /// Contador de animación del spinner de carga (0-7)
     pub spinner_frame: u8,
+
+    // — Portadas de anime —
+    /// Picker de protocolo gráfico soportado por la terminal
+    pub cover_picker: Picker,
+
+    /// Estado del widget de imagen con redimensionado en segundo plano
+    pub cover_protocol: ThreadProtocol,
+
+    /// Caché en memoria de portadas decodificadas
+    pub cover_cache: CoverCache,
+
+    /// URL de la portada actualmente seleccionada
+    pub active_cover_url: Option<String>,
+
+    /// Indica si la portada activa ya tiene al menos un frame codificado
+    pub cover_frame_ready: bool,
+
+    /// URL pendiente de descarga con debounce para evitar ráfagas al navegar rápido
+    pending_cover_fetch: Option<(String, Instant)>,
 }
 
 impl App {
     /// Crea una nueva instancia de la aplicación con estado inicial.
     pub fn new() -> Self {
+        let (noop_resize_tx, _noop_resize_rx) = tokio::sync::mpsc::unbounded_channel();
+
         App {
             screen: Screen::Search,
             should_quit: false,
@@ -184,7 +222,26 @@ impl App {
             info_message: None,
             player_info: crate::player::player_info(),
             spinner_frame: 0,
+
+            cover_picker: cover::default_picker(),
+            cover_protocol: ThreadProtocol::new(noop_resize_tx, None),
+            cover_cache: CoverCache::default(),
+            active_cover_url: None,
+            cover_frame_ready: false,
+            pending_cover_fetch: None,
         }
+    }
+
+    /// Configura el picker detectado y el canal real del worker de redimensionado.
+    pub fn init_cover_worker(
+        &mut self,
+        picker: Picker,
+        resize_tx: UnboundedSender<ResizeRequest>,
+    ) {
+        self.cover_picker = picker;
+        self.cover_protocol = ThreadProtocol::new(resize_tx, None);
+        self.cover_frame_ready = false;
+        self.sync_cover_selection(true);
     }
 
     // ————————————————————————————————————————
@@ -200,12 +257,19 @@ impl App {
         self.error_message = None;
         self.info_message = None;
         match self.screen {
-            Screen::Sources => self.screen = Screen::Episodes,
-            Screen::Episodes => self.screen = Screen::Results,
+            Screen::Sources => {
+                self.screen = Screen::Episodes;
+                self.sync_cover_selection(true);
+            }
+            Screen::Episodes => {
+                self.screen = Screen::Results;
+                self.sync_cover_selection(true);
+            }
             Screen::Results => {
                 self.screen = Screen::Search;
                 self.search_results.clear();
                 self.results_state = ListState::default();
+                self.sync_cover_selection(true);
             }
             Screen::Search => {
                 if self.search_input.is_empty() {
@@ -263,31 +327,31 @@ impl App {
     pub fn list_up(&mut self) {
         match self.screen {
             Screen::Results => {
+                let len = self.search_results.len();
+                if len == 0 {
+                    return;
+                }
                 let i = self.results_state.selected().unwrap_or(0);
-                let new = if i == 0 {
-                    self.search_results.len().saturating_sub(1)
-                } else {
-                    i - 1
-                };
+                let new = if i == 0 { len - 1 } else { i - 1 };
                 self.results_state.select(Some(new));
+                self.sync_cover_selection(false);
             }
             Screen::Episodes => {
+                let len = self.episodes.len();
+                if len == 0 {
+                    return;
+                }
                 let i = self.episodes_state.selected().unwrap_or(0);
-                let new = if i == 0 {
-                    self.episodes.len().saturating_sub(1)
-                } else {
-                    i - 1
-                };
+                let new = if i == 0 { len - 1 } else { i - 1 };
                 self.episodes_state.select(Some(new));
             }
             Screen::Sources => {
-                let sources = self.sources.get(&self.selected_audio);
+                let len = self.sources.get(&self.selected_audio).len();
+                if len == 0 {
+                    return;
+                }
                 let i = self.sources_state.selected().unwrap_or(0);
-                let new = if i == 0 {
-                    sources.len().saturating_sub(1)
-                } else {
-                    i - 1
-                };
+                let new = if i == 0 { len - 1 } else { i - 1 };
                 self.sources_state.select(Some(new));
             }
             _ => {}
@@ -302,6 +366,7 @@ impl App {
                 if len == 0 { return; }
                 let i = self.results_state.selected().unwrap_or(0);
                 self.results_state.select(Some((i + 1) % len));
+                self.sync_cover_selection(false);
             }
             Screen::Episodes => {
                 let len = self.episodes.len();
@@ -343,11 +408,15 @@ impl App {
         if !self.search_results.is_empty() {
             self.results_state.select(Some(0));
             self.screen = Screen::Results;
+            self.sync_cover_selection(true);
         }
     }
 
     /// Actualiza la lista de episodios del anime seleccionado.
     pub fn set_episodes(&mut self, anime: Anime, episodes: Vec<Episode>) {
+        if let Some(existing) = self.search_results.iter_mut().find(|a| a.slug == anime.slug) {
+            *existing = anime.clone();
+        }
         self.selected_anime = Some(anime);
         self.episodes = episodes;
         self.loading = LoadingState::Idle;
@@ -357,6 +426,7 @@ impl App {
         if !self.episodes.is_empty() {
             self.episodes_state.select(Some(0));
             self.screen = Screen::Episodes;
+            self.sync_cover_selection(true);
         }
     }
 
@@ -426,6 +496,140 @@ impl App {
         const FRAMES: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
         FRAMES[self.spinner_frame as usize]
     }
+
+    // ————————————————————————————————————————
+    // Sincronización y caché de portadas
+    // ————————————————————————————————————————
+
+    /// Sincroniza la portada mostrada con el anime actualmente activo en pantalla.
+    pub fn sync_cover_selection(&mut self, immediate: bool) {
+        let desired = match self.screen {
+            Screen::Results => self
+                .results_state
+                .selected()
+                .and_then(|i| self.search_results.get(i))
+                .and_then(|a| a.cover_url.clone()),
+            Screen::Episodes => self
+                .selected_anime
+                .as_ref()
+                .and_then(|a| a.cover_url.clone()),
+            _ => None,
+        };
+
+        if desired == self.active_cover_url {
+            return;
+        }
+
+        self.active_cover_url = desired.clone();
+        self.pending_cover_fetch = None;
+
+        let Some(url) = desired else {
+            self.cover_protocol.empty_protocol();
+            self.cover_frame_ready = false;
+            return;
+        };
+
+        match self.cover_cache.get(&url) {
+            Some(CoverEntry::Ready(img)) => {
+                self.cover_protocol
+                    .replace_protocol(self.cover_picker.new_resize_protocol(img.clone()));
+                self.cover_frame_ready = false;
+            }
+            Some(CoverEntry::Loading) | Some(CoverEntry::Failed) => {
+                self.cover_protocol.empty_protocol();
+                self.cover_frame_ready = false;
+            }
+            None => {
+                self.cover_protocol.empty_protocol();
+                self.cover_frame_ready = false;
+                let delay = if immediate {
+                    Duration::ZERO
+                } else {
+                    Duration::from_millis(60)
+                };
+                self.pending_cover_fetch = Some((url, Instant::now() + delay));
+            }
+        }
+    }
+
+    /// Devuelve y marca como `Loading` la siguiente portada cuyo debounce venció.
+    pub fn take_due_cover_fetch(&mut self) -> Option<String> {
+        let (_, due_at) = self.pending_cover_fetch.as_ref()?;
+        if Instant::now() < *due_at {
+            return None;
+        }
+        let (url, _) = self.pending_cover_fetch.take()?;
+        if self.cover_cache.get(&url).is_some() {
+            return None;
+        }
+        self.cover_cache.mark_loading(&url);
+        Some(url)
+    }
+
+    /// Registra el resultado de descargar/decodificar una portada en background.
+    pub fn handle_cover_loaded(&mut self, url: String, image: Option<DynamicImage>) {
+        match image {
+            Some(img) => {
+                self.cover_cache.insert_ready(url.clone(), img.clone());
+                if self.active_cover_url.as_deref() == Some(url.as_str()) {
+                    self.cover_protocol
+                        .replace_protocol(self.cover_picker.new_resize_protocol(img));
+                    self.cover_frame_ready = false;
+                }
+            }
+            None => {
+                self.cover_cache.insert_failed(url);
+            }
+        }
+    }
+
+    /// Aplica el resultado de redimensionado/codificación asíncrono al protocolo activo.
+    pub fn handle_cover_resized(&mut self, completed: ResizeResponse) {
+        if self.cover_protocol.update_resized_protocol(completed) {
+            self.cover_frame_ready = true;
+        }
+    }
+
+    /// Indica si hay descarga o codificación de portada activa para acortar el poll del loop.
+    pub fn has_pending_cover_work(&self) -> bool {
+        self.pending_cover_fetch.is_some()
+            || self.active_cover_url.as_deref().is_some_and(|u| {
+                matches!(self.cover_cache.get(u), Some(CoverEntry::Loading))
+                    || (!self.cover_frame_ready
+                        && matches!(self.cover_cache.get(u), Some(CoverEntry::Ready(_))))
+            })
+    }
+
+    /// Estado de renderizado para la URL de portada solicitada.
+    pub fn cover_state(&self, url: Option<&str>) -> CoverDisplayState {
+        let Some(url) = url else {
+            return CoverDisplayState::Unavailable;
+        };
+        if self.active_cover_url.as_deref() != Some(url) {
+            return match self.cover_cache.get(url) {
+                Some(CoverEntry::Failed) => CoverDisplayState::Unavailable,
+                _ => CoverDisplayState::Loading,
+            };
+        }
+        match self.cover_cache.get(url) {
+            Some(CoverEntry::Ready(_)) => CoverDisplayState::Ready {
+                frame_encoded: self.cover_frame_ready,
+            },
+            Some(CoverEntry::Failed) => CoverDisplayState::Unavailable,
+            Some(CoverEntry::Loading) | None => CoverDisplayState::Loading,
+        }
+    }
+
+    /// En protocolos de píxeles directos (Sixel/iTerm2), evita dibujar sobre modales centrados.
+    pub fn should_suppress_cover_for_overlay(&self) -> bool {
+        let has_overlay =
+            self.loading.is_loading() || self.error_message.is_some() || self.info_message.is_some();
+        has_overlay
+            && matches!(
+                self.cover_picker.protocol_type(),
+                ProtocolType::Sixel | ProtocolType::Iterm2
+            )
+    }
 }
 
 impl Default for App {
@@ -437,7 +641,7 @@ impl Default for App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::structs::VideoSource;
+    use crate::structs::{AnimeCategory, VideoSource};
 
     #[test]
     fn utf8_input_and_delete_do_not_panic() {
@@ -486,5 +690,53 @@ mod tests {
         app.set_sources(ep, sources);
         assert_eq!(app.selected_audio, AudioType::Dub);
         assert_eq!(app.sources_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn cover_selection_schedules_fetch_and_updates_from_cache() {
+        let mut app = App::new();
+        let a1 = Anime {
+            id: "1".into(),
+            title: "Naruto".into(),
+            slug: "naruto".into(),
+            synopsis: "Ninja".into(),
+            category: AnimeCategory::TvAnime,
+            mal_id: None,
+            episodes_count: None,
+            score: None,
+            cover_url: Some("https://cdn.animeav1.com/covers/190.jpg".into()),
+        };
+        let a2 = Anime {
+            id: "2".into(),
+            title: "Lain".into(),
+            slug: "serial-experiments-lain".into(),
+            synopsis: "Wired".into(),
+            category: AnimeCategory::TvAnime,
+            mal_id: None,
+            episodes_count: None,
+            score: None,
+            cover_url: Some("https://cdn.animeav1.com/covers/1684.jpg".into()),
+        };
+
+        app.set_search_results(vec![a1, a2], 1, 1, "test".into());
+        assert_eq!(
+            app.active_cover_url.as_deref(),
+            Some("https://cdn.animeav1.com/covers/190.jpg")
+        );
+        assert_eq!(
+            app.take_due_cover_fetch().as_deref(),
+            Some("https://cdn.animeav1.com/covers/190.jpg")
+        );
+        assert!(app.take_due_cover_fetch().is_none());
+
+        app.list_down();
+        assert_eq!(
+            app.active_cover_url.as_deref(),
+            Some("https://cdn.animeav1.com/covers/1684.jpg")
+        );
+        assert_eq!(
+            app.cover_state(app.active_cover_url.as_deref()),
+            CoverDisplayState::Loading
+        );
     }
 }

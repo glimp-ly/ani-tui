@@ -25,12 +25,12 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, List, ListItem, Paragraph},
 };
 
 use crate::app::App;
-use crate::structs::AnimeCategory;
 use crate::ui::search::palette;
+use crate::ui::{PreviewTarget, category_badge, render_anime_preview};
 
 /// Renderiza la pantalla de resultados de búsqueda.
 pub fn render_results(f: &mut Frame, app: &mut App) {
@@ -40,19 +40,47 @@ pub fn render_results(f: &mut Frame, app: &mut App) {
     let bg = Block::default().style(Style::default().bg(palette::BG));
     f.render_widget(bg, area);
 
-    // Layout: lista + sinopsis + barra de estado
-    let layout = Layout::default()
+    // Layout: contenido principal + barra de atajos
+    let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(10),        // lista de resultados
-            Constraint::Length(6),      // sinopsis del seleccionado
-            Constraint::Length(1),      // línea de atajos
+            Constraint::Min(10),   // lista + portada/detalle
+            Constraint::Length(1), // línea de atajos
         ])
         .split(area);
 
-    render_results_list(f, app, layout[0]);
-    render_synopsis_panel(f, app, layout[1]);
-    render_results_keybindings(f, app, layout[2]);
+    if area.width >= 78 && area.height >= 16 {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(outer[0]);
+        render_results_list(f, app, cols[0]);
+        render_anime_preview(
+            f,
+            cols[1],
+            app,
+            PreviewTarget::SearchResult,
+            " Portada y detalle ",
+            false,
+        );
+    } else {
+        let preview_h = if area.height >= 22 { 12 } else { 7 };
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(6), Constraint::Length(preview_h)])
+            .split(outer[0]);
+        render_results_list(f, app, rows[0]);
+        render_anime_preview(
+            f,
+            rows[1],
+            app,
+            PreviewTarget::SearchResult,
+            " Portada y detalle ",
+            false,
+        );
+    }
+
+    render_results_keybindings(f, app, outer[1]);
 
     // Overlay de carga/error/info
     if app.loading.is_loading() {
@@ -95,26 +123,22 @@ fn render_results_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect
 
     // Construir items de la lista en bloque interno para liberar el préstamo sobre app.search_results
     let selected_idx = app.results_state.selected();
+    let inner_width = area.width.saturating_sub(2) as usize;
     let items: Vec<ListItem> = app.search_results
         .iter()
         .enumerate()
         .map(|(i, anime)| {
             let is_selected = selected_idx == Some(i);
 
-            // Badge de categoría
-            let (cat_text, cat_color) = match &anime.category {
-                AnimeCategory::TvAnime  => (" TV  ", palette::ACCENT),
-                AnimeCategory::Movie    => ("MOV  ", palette::ACCENT2),
-                AnimeCategory::Ova      => (" OVA ", palette::SUCCESS),
-                AnimeCategory::Special  => (" ESP ", palette::WARNING),
-                AnimeCategory::Ona      => (" ONA ", palette::HIGHLIGHT),
-                AnimeCategory::Unknown(_) => ("  ?  ", palette::TEXT_DIM),
-            };
+            let (cat_text, cat_color) = category_badge(&anime.category);
 
             // Puntuación (si disponible)
             let score_str = anime.score
                 .map(|s| format!(" ★ {:.1}", s))
                 .unwrap_or_default();
+            let max_title = inner_width
+                .saturating_sub(10 + score_str.chars().count())
+                .max(12);
 
             // Construir la línea del item
             let prefix = if is_selected { "▶ " } else { "  " };
@@ -131,7 +155,7 @@ fn render_results_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect
                 ),
                 Span::raw(" "),
                 Span::styled(
-                    truncate_str(&anime.title, 45),
+                    truncate_str(&anime.title, max_title),
                     Style::default()
                         .fg(if is_selected { palette::TEXT } else { palette::TEXT_DIM })
                         .add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() }),
@@ -154,62 +178,6 @@ fn render_results_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect
 
     let list = List::new(items).block(block);
     f.render_stateful_widget(list, area, &mut app.results_state);
-}
-
-/// Renderiza el panel de sinopsis del anime seleccionado.
-fn render_synopsis_panel(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let selected_anime = app.results_state
-        .selected()
-        .and_then(|i| app.search_results.get(i));
-
-    let content = if let Some(anime) = selected_anime {
-        vec![
-            Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    &anime.title,
-                    Style::default()
-                        .fg(palette::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  [{}]", anime.category.display()),
-                    Style::default().fg(palette::TEXT_DIM),
-                ),
-            ]),
-            Line::from(Span::styled(
-                format!("  {}", if anime.synopsis.is_empty() {
-                    "Sin sinopsis disponible."
-                } else {
-                    &anime.synopsis
-                }),
-                Style::default().fg(palette::TEXT_DIM),
-            )),
-        ]
-    } else {
-        vec![Line::from(Span::styled(
-            "  Selecciona un anime para ver la sinopsis",
-            Style::default()
-                .fg(palette::TEXT_DIM)
-                .add_modifier(Modifier::ITALIC),
-        ))]
-    };
-
-    let synopsis = Paragraph::new(content)
-        .block(
-            Block::default()
-                .title(Line::from(Span::styled(
-                    " 📖 Sinopsis ",
-                    Style::default().fg(palette::TEXT_DIM),
-                )))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(palette::BORDER))
-                .style(Style::default().bg(palette::BG)),
-        )
-        .wrap(Wrap { trim: true });
-
-    f.render_widget(synopsis, area);
 }
 
 /// Renderiza la barra de atajos de teclado para la pantalla de resultados.
@@ -247,7 +215,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        let truncated: String = s.chars().take(max_len - 1).collect();
+        let truncated: String = s.chars().take(max_len.saturating_sub(1)).collect();
         format!("{}…", truncated)
     }
 }

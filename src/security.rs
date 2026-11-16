@@ -167,6 +167,70 @@ pub fn validate_search_query(query: &str) -> Result<(), SecurityError> {
     Ok(())
 }
 
+/// Valida que la URL de una portada sea HTTP/HTTPS público y seguro.
+pub fn validate_cover_url(url: &str) -> Result<(), SecurityError> {
+    if url.is_empty() || url.len() > 500 {
+        return Err(SecurityError::InvalidUrl {
+            url: crate::structs::truncate_chars(url, 60).to_string(),
+            reason: "URL de portada vacía o demasiado larga".to_string(),
+        });
+    }
+
+    let rest = if let Some(r) = url.strip_prefix("https://") {
+        r
+    } else if let Some(r) = url.strip_prefix("http://") {
+        r
+    } else {
+        return Err(SecurityError::InvalidUrl {
+            url: crate::structs::truncate_chars(url, 60).to_string(),
+            reason: "esquema no permitido (solo http/https)".to_string(),
+        });
+    };
+
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return Err(SecurityError::InvalidUrl {
+            url: crate::structs::truncate_chars(url, 60).to_string(),
+            reason: "autoridad de URL inválida".to_string(),
+        });
+    }
+
+    let host = if authority.starts_with('[') {
+        authority
+            .trim_start_matches('[')
+            .split(']')
+            .next()
+            .unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let host_lower = host.to_ascii_lowercase();
+
+    let is_disallowed_host = host_lower.is_empty()
+        || host_lower == "localhost"
+        || host_lower.ends_with(".local")
+        || host_lower.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_unique_local()
+                    || v6.is_unicast_link_local()
+            }
+        });
+
+    if is_disallowed_host {
+        return Err(SecurityError::InvalidUrl {
+            url: crate::structs::truncate_chars(url, 60).to_string(),
+            reason: "host privado o no permitido".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
 // ————————————————————————————————————————————————
 // Error de seguridad
 // ————————————————————————————————————————————————
@@ -181,6 +245,8 @@ pub enum SecurityError {
     InvalidEpisodeNumber { number: u32, reason: String },
     /// Consulta de búsqueda inválida
     InvalidQuery { reason: String },
+    /// URL inválida o bloqueada
+    InvalidUrl { url: String, reason: String },
 }
 
 impl std::fmt::Display for SecurityError {
@@ -194,6 +260,9 @@ impl std::fmt::Display for SecurityError {
             }
             SecurityError::InvalidQuery { reason } => {
                 write!(f, "Consulta de búsqueda inválida: {}", reason)
+            }
+            SecurityError::InvalidUrl { url, reason } => {
+                write!(f, "URL inválida '{}': {}", url, reason)
             }
         }
     }
@@ -241,5 +310,18 @@ mod tests {
         assert!(validate_episode_number(1).is_ok());
         assert!(validate_episode_number(1180).is_ok());
         assert!(validate_episode_number(100_000).is_err());
+    }
+
+    #[test]
+    fn validate_cover_url_checks_scheme_and_private_hosts() {
+        assert!(validate_cover_url("https://cdn.animeav1.com/covers/190.jpg").is_ok());
+        assert!(validate_cover_url("https://animeav1.com/covers/190.jpg").is_ok());
+        assert!(validate_cover_url("").is_err());
+        assert!(validate_cover_url("file:///etc/passwd").is_err());
+        assert!(validate_cover_url("javascript:alert(1)").is_err());
+        assert!(validate_cover_url("http://127.0.0.1/img.jpg").is_err());
+        assert!(validate_cover_url("https://localhost/img.jpg").is_err());
+        assert!(validate_cover_url("https://192.168.1.50/img.jpg").is_err());
+        assert!(validate_cover_url("https://[::1]/img.jpg").is_err());
     }
 }

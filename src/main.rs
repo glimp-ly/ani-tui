@@ -13,6 +13,7 @@
 
 mod app;
 mod config;
+mod cover;
 mod logger;
 mod player;
 mod resolver;
@@ -138,17 +139,42 @@ async fn run_tui() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+
+    // Consultar protocolo gráfico tras entrar en alternate screen y antes de leer eventos
+    let picker = cover::detect_picker();
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
-
-    // — Inicializar estado de la aplicación —
-    let mut app = App::new();
 
     // — Canal para resultados asíncronos —
     // Los scrapers corren en tareas Tokio separadas y envían resultados
     // de vuelta al event loop mediante este canal.
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
+
+    // — Worker en background para redimensionado/codificación de portadas —
+    let (resize_tx, mut resize_rx) =
+        mpsc::unbounded_channel::<ratatui_image::thread::ResizeRequest>();
+    let tx_resize = tx.clone();
+    tokio::spawn(async move {
+        while let Some(req) = resize_rx.recv().await {
+            match tokio::task::spawn_blocking(move || req.resize_encode()).await {
+                Ok(Ok(completed)) => {
+                    let _ = tx_resize.send(AppEvent::CoverResized(completed));
+                }
+                Ok(Err(e)) => {
+                    logger::log_warn("cover", &format!("error codificando portada: {}", e));
+                }
+                Err(e) => {
+                    logger::log_warn("cover", &format!("worker de portada abortado: {}", e));
+                }
+            }
+        }
+    });
+
+    // — Inicializar estado de la aplicación —
+    let mut app = App::new();
+    app.init_cover_worker(picker, resize_tx);
 
     // — Pantalla anterior para el overlay de ayuda —
     let mut prev_screen = Screen::Search;
@@ -157,16 +183,26 @@ async fn run_tui() -> Result<()> {
     // Event loop principal
     // ————————————————————————————————
     loop {
-        // — Renderizar UI —
-        terminal.draw(|f| ui::render(f, &mut app))?;
-
-        // — Procesar mensajes de tareas asíncronas (no bloqueante) —
+        // — Procesar mensajes de tareas asíncronas antes de renderizar —
         while let Ok(event) = rx.try_recv() {
             handle_app_event(&mut app, event);
         }
 
-        // — Procesar evento de input (timeout 100ms para animar spinner) —
-        if event::poll(Duration::from_millis(100))? {
+        // — Disparar descarga de portada pendiente tras debounce —
+        if let Some(url) = app.take_due_cover_fetch() {
+            spawn_cover_fetch(&tx, url);
+        }
+
+        // — Renderizar UI —
+        terminal.draw(|f| ui::render(f, &mut app))?;
+
+        // — Procesar evento de input (poll corto mientras haya carga/portada pendiente) —
+        let poll_ms = if app.loading.is_loading() || app.has_pending_cover_work() {
+            20
+        } else {
+            100
+        };
+        if event::poll(Duration::from_millis(poll_ms))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
@@ -208,6 +244,7 @@ async fn run_tui() -> Result<()> {
                     Screen::Help => {
                         // Cualquier tecla cierra el modal de ayuda
                         app.screen = prev_screen.clone();
+                        app.sync_cover_selection(true);
                     }
                 }
 
@@ -218,8 +255,8 @@ async fn run_tui() -> Result<()> {
                 }
             }
         } else {
-            // Timeout → avanzar animación del spinner si hay carga
-            if app.loading.is_loading() {
+            // Timeout → avanzar animación del spinner si hay carga o portada descargándose
+            if app.loading.is_loading() || app.has_pending_cover_work() {
                 app.tick_spinner();
             }
         }
@@ -262,8 +299,30 @@ enum AppEvent {
     },
     /// Resultado de lanzar reproducción en mpv o navegador
     PlayFinished(player::PlayResult),
+    /// Portada descargada y decodificada (None si falló)
+    CoverLoaded {
+        url: String,
+        image: Option<image::DynamicImage>,
+    },
+    /// Portada redimensionada y codificada para el protocolo de terminal
+    CoverResized(ratatui_image::thread::ResizeResponse),
     /// Error en una operación asíncrona
     Error(String),
+}
+
+/// Descarga y decodifica una portada en background sin bloquear la TUI.
+fn spawn_cover_fetch(tx: &UnboundedSender<AppEvent>, url: String) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let image = match cover::fetch_cover(&url).await {
+            Ok(img) => Some(img),
+            Err(e) => {
+                logger::log_warn("cover", &format!("no se pudo cargar portada {}: {}", url, e));
+                None
+            }
+        };
+        let _ = tx.send(AppEvent::CoverLoaded { url, image });
+    });
 }
 
 /// Procesa un evento de tarea asíncrona y actualiza el estado de la app.
@@ -310,6 +369,12 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
                     app.set_error(format!("Error al reproducir: {}", e));
                 }
             }
+        }
+        AppEvent::CoverLoaded { url, image } => {
+            app.handle_cover_loaded(url, image);
+        }
+        AppEvent::CoverResized(completed) => {
+            app.handle_cover_resized(completed);
         }
         AppEvent::Error(msg) => {
             app.set_error(msg);
@@ -398,6 +463,7 @@ async fn handle_results_input(
         // Ir a pantalla de búsqueda con '/'
         KeyCode::Char('/') => {
             app.screen = app::Screen::Search;
+            app.sync_cover_selection(true);
         }
         // Página siguiente
         KeyCode::Right if app.results_page < app.results_total_pages => {
@@ -583,6 +649,9 @@ async fn run_search_plain(query: &str, page: u32) -> Result<()> {
                     anime.title
                 );
                 println!("      URL: {}", anime.page_url(config::BASE_URL));
+                if let Some(ref cover) = anime.cover_url {
+                    println!("      Portada: {}", cover);
+                }
                 if !anime.synopsis.is_empty() {
                     // Mostrar primer párrafo de la sinopsis
                     let first_line = anime.synopsis.lines().next().unwrap_or("");

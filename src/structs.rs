@@ -100,6 +100,9 @@ pub struct Anime {
 
     /// Puntuación del anime (0.0 - 10.0)
     pub score: Option<f32>,
+
+    /// URL de la imagen de portada del anime (puede ser None si no está disponible)
+    pub cover_url: Option<String>,
 }
 
 impl Anime {

@@ -28,6 +28,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::ui::search::palette;
+use crate::ui::{PreviewTarget, render_anime_preview};
 
 /// Renderiza la pantalla de lista de episodios.
 pub fn render_episodes(f: &mut Frame, app: &mut App) {
@@ -37,16 +38,48 @@ pub fn render_episodes(f: &mut Frame, app: &mut App) {
     let bg = Block::default().style(Style::default().bg(palette::BG));
     f.render_widget(bg, area);
 
-    // Layout: encabezado + lista + barra de atajos
+    // Layout: lista + portada/detalle + barra de atajos
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),     // lista de episodios
+            Constraint::Min(5),     // lista de episodios y ficha del anime
             Constraint::Length(2),  // barra de atajos
         ])
         .split(area);
 
-    render_episodes_list(f, app, layout[0]);
+    if area.width >= 78 && area.height >= 16 {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
+            .split(layout[0]);
+        render_episodes_list(f, app, cols[0]);
+        render_anime_preview(
+            f,
+            cols[1],
+            app,
+            PreviewTarget::SelectedAnime,
+            " Anime seleccionado ",
+            false,
+        );
+    } else if area.height >= 18 {
+        let preview_h = if area.height >= 24 { 12 } else { 8 };
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(preview_h), Constraint::Min(6)])
+            .split(layout[0]);
+        render_anime_preview(
+            f,
+            rows[0],
+            app,
+            PreviewTarget::SelectedAnime,
+            " Anime seleccionado ",
+            false,
+        );
+        render_episodes_list(f, app, rows[1]);
+    } else {
+        render_episodes_list(f, app, layout[0]);
+    }
+
     render_episodes_keybindings(f, app, layout[1]);
 
     // Overlays

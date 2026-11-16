@@ -25,6 +25,68 @@ pub use episodes::get_episodes;
 pub use episodes::get_episodes_by_slug;
 pub use sources::get_video_sources;
 
+use regex::Regex;
+use std::sync::OnceLock;
+
+static RE_IMG_TAG: OnceLock<Regex> = OnceLock::new();
+static RE_IMG_SRC: OnceLock<Regex> = OnceLock::new();
+
+/// Normaliza y valida una URL de portada extraída de HTML/JS.
+pub(crate) fn normalize_cover_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().replace("&amp;", "&");
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = if trimmed.starts_with("//") {
+        format!("https:{}", trimmed)
+    } else if trimmed.starts_with('/') {
+        format!("{}{}", crate::config::BASE_URL, trimmed)
+    } else {
+        trimmed
+    };
+
+    crate::security::validate_cover_url(&normalized)
+        .ok()
+        .map(|()| normalized)
+}
+
+/// Extrae la mejor URL de portada dentro de un fragmento HTML buscando
+/// primero imágenes marcadas como póster/portada y luego URLs de `/covers/`.
+pub(crate) fn extract_cover_from_html(html: &str) -> Option<String> {
+    let re_img = RE_IMG_TAG
+        .get_or_init(|| Regex::new(r"(?is)<img\b[^>]*>").expect("regex img_tag inválida"));
+    let re_src = RE_IMG_SRC
+        .get_or_init(|| Regex::new(r#"\bsrc\s*=\s*["']([^"']+)["']"#).expect("regex img_src inválida"));
+
+    let mut fallback_cover: Option<String> = None;
+
+    for m in re_img.find_iter(html) {
+        let tag = m.as_str();
+        let Some(src) = re_src
+            .captures(tag)
+            .and_then(|c| c.get(1))
+            .and_then(|s| normalize_cover_url(s.as_str()))
+        else {
+            continue;
+        };
+
+        let tag_lower = tag.to_ascii_lowercase();
+        if tag_lower.contains("aspect-poster")
+            || tag_lower.contains("portada")
+            || tag_lower.contains("poster")
+        {
+            return Some(src);
+        }
+
+        if fallback_cover.is_none() && src.contains("/covers/") {
+            fallback_cover = Some(src);
+        }
+    }
+
+    fallback_cover
+}
+
 /// Busca `marker` (que debe terminar con el delimitador `open`, ej. `"results:["`
 /// o `"embeds:{"`) en `text` y extrae el slice balanceado hasta su `close`
 /// correspondiente, ignorando delimitadores dentro de literales de cadena JS.

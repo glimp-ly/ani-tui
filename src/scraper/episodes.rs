@@ -19,7 +19,7 @@ use std::sync::OnceLock;
 use crate::config::BASE_URL;
 use crate::logger;
 use crate::scraper::client::fetch_html;
-use crate::scraper::find_balanced_content;
+use crate::scraper::{extract_cover_from_html, find_balanced_content};
 use crate::security;
 use crate::structs::{Anime, AnimeCategory, Episode};
 
@@ -116,6 +116,9 @@ pub async fn get_episodes(anime: &mut Anime) -> Result<Vec<Episode>> {
             anime.category = cat;
         }
     }
+    if let Some(cover_url) = metadata.cover_url {
+        anime.cover_url = Some(cover_url);
+    }
 
     Ok(episodes)
 }
@@ -155,6 +158,8 @@ pub struct AnimeMetadata {
     pub category: Option<AnimeCategory>,
     /// ID en MyAnimeList
     pub mal_id: Option<u32>,
+    /// URL de la imagen de portada del anime
+    pub cover_url: Option<String>,
 }
 
 // ————————————————————————————————————————————————
@@ -220,11 +225,14 @@ fn extract_anime_metadata(html: &str) -> AnimeMetadata {
         .and_then(|c| c.get(1))
         .and_then(|m| m.as_str().parse::<u32>().ok());
 
+    let cover_url = extract_cover_from_html(html);
+
     AnimeMetadata {
         episodes_count,
         score,
         category,
         mal_id,
+        cover_url,
     }
 }
 
@@ -234,7 +242,7 @@ mod tests {
 
     #[test]
     fn parse_episodes_fixture_sorts_and_extracts_metadata() {
-        let html = r#"category:{id:5,name:"ONA"},episodesCount:2,score:8.9,malId:42,episodes:[{id:20,number:2},{id:10,number:1}]"#;
+        let html = r#"<img class="aspect-poster" src="https://cdn.animeav1.com/covers/42.jpg" alt="Demo Poster"/>category:{id:5,name:"ONA"},episodesCount:2,score:8.9,malId:42,episodes:[{id:20,number:2},{id:10,number:1}]"#;
         let (eps, meta) = parse_episodes_from_html(html, "demo-anime").unwrap();
         assert_eq!(eps.len(), 2);
         assert_eq!(eps[0].number, 1);
@@ -243,6 +251,10 @@ mod tests {
         assert_eq!(meta.score, Some(8.9));
         assert_eq!(meta.mal_id, Some(42));
         assert_eq!(meta.category, Some(AnimeCategory::Ona));
+        assert_eq!(
+            meta.cover_url.as_deref(),
+            Some("https://cdn.animeav1.com/covers/42.jpg")
+        );
     }
 
     #[test]
@@ -258,6 +270,10 @@ mod tests {
         assert_eq!(eps_n[0].number, 1);
         assert_eq!(eps_n[219].number, 220);
         assert!(meta_n.score.is_some());
+        assert_eq!(
+            meta_n.cover_url.as_deref(),
+            Some("https://cdn.animeav1.com/covers/190.jpg")
+        );
 
         let op_html = std::fs::read_to_string(dir.join("media_one_piece.html")).unwrap();
         let (eps_op, meta_op) = parse_episodes_from_html(&op_html, "one-piece").unwrap();
@@ -265,14 +281,26 @@ mod tests {
         assert_eq!(eps_op[0].number, 1);
         assert!(eps_op.windows(2).all(|w| w[0].number <= w[1].number));
         assert!(meta_op.episodes_count.is_some());
+        assert_eq!(
+            meta_op.cover_url.as_deref(),
+            Some("https://cdn.animeav1.com/covers/197.jpg")
+        );
 
         let lain_html = std::fs::read_to_string(dir.join("media_serial_experiments_lain.html")).unwrap();
-        let (eps_l, _) = parse_episodes_from_html(&lain_html, "serial-experiments-lain").unwrap();
+        let (eps_l, meta_l) = parse_episodes_from_html(&lain_html, "serial-experiments-lain").unwrap();
         assert_eq!(eps_l.len(), 13);
+        assert_eq!(
+            meta_l.cover_url.as_deref(),
+            Some("https://cdn.animeav1.com/covers/1684.jpg")
+        );
 
         let rezero_html = std::fs::read_to_string(dir.join("media_rezero4.html")).unwrap();
-        let (eps_rz, _) = parse_episodes_from_html(&rezero_html, "rezero4").unwrap();
+        let (eps_rz, meta_rz) = parse_episodes_from_html(&rezero_html, "rezero4").unwrap();
         assert!(!eps_rz.is_empty());
         assert_eq!(eps_rz[0].number, 1);
+        assert_eq!(
+            meta_rz.cover_url.as_deref(),
+            Some("https://cdn.animeav1.com/covers/3968.jpg")
+        );
     }
 }
