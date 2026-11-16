@@ -117,6 +117,17 @@ pub fn render_anime_preview(
         };
         anime.map(|a| {
             let (cat_badge, cat_color) = category_badge(&a.category);
+            let hist_note = app.history.get_anime(&a.slug).map(|entry| {
+                match entry.episodes.get(&entry.last_episode) {
+                    Some(p) if p.completed => format!("Visto: Ep. {} ✓", entry.last_episode),
+                    Some(p) if p.position_secs >= 5 => format!(
+                        "Visto: Ep. {} (⏱ {})",
+                        entry.last_episode,
+                        crate::storage::format_duration(p.position_secs)
+                    ),
+                    _ => format!("Visto: Ep. {}", entry.last_episode),
+                }
+            });
             (
                 a.title.clone(),
                 cat_badge,
@@ -125,11 +136,21 @@ pub fn render_anime_preview(
                 a.episodes_count,
                 a.synopsis.clone(),
                 a.cover_url.clone(),
+                hist_note,
             )
         })
     };
 
-    let Some((title, cat_badge, cat_color, score, episodes_count, synopsis, cover_url)) = snapshot
+    let Some((
+        title,
+        cat_badge,
+        cat_color,
+        score,
+        episodes_count,
+        synopsis,
+        cover_url,
+        hist_note,
+    )) = snapshot
     else {
         let empty = Paragraph::new(Line::from(Span::styled(
             "Selecciona un anime para ver su portada y detalles",
@@ -193,6 +214,7 @@ pub fn render_anime_preview(
         cat_color,
         score,
         episodes_count,
+        hist_note.as_deref(),
     );
 
     if v_chunks[1].height >= 3 {
@@ -266,6 +288,7 @@ fn render_centered_label(f: &mut Frame, area: Rect, text: &str) {
     f.render_widget(p, centered);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_title_and_meta(
     f: &mut Frame,
     area: Rect,
@@ -274,6 +297,7 @@ fn render_title_and_meta(
     cat_color: Color,
     score: Option<f32>,
     episodes_count: Option<u32>,
+    hist_note: Option<&str>,
 ) {
     let mut meta_spans = vec![Span::styled(
         format!("[{}]", cat_badge.trim()),
@@ -292,7 +316,7 @@ fn render_title_and_meta(
         ));
     }
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             title,
             Style::default()
@@ -302,6 +326,13 @@ fn render_title_and_meta(
         Line::from(""),
         Line::from(meta_spans),
     ];
+
+    if let Some(note) = hist_note {
+        lines.push(Line::from(Span::styled(
+            note,
+            Style::default().fg(palette::SUCCESS),
+        )));
+    }
 
     let widget = Paragraph::new(lines).wrap(Wrap { trim: true });
     f.render_widget(widget, area);
@@ -433,5 +464,54 @@ mod tests {
 
         let mut tiny = Terminal::new(TestBackend::new(30, 12)).unwrap();
         tiny.draw(|f| render(f, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn search_episodes_and_sources_render_history_and_resume_badges() {
+        let mut app = App::new();
+        let anime = sample_anime(None);
+        let ep = Episode {
+            id: 50,
+            number: 5,
+            anime_slug: "naruto".into(),
+        };
+        app.set_episodes(anime, vec![ep.clone()]);
+        app.selected_episode = Some(ep);
+        app.record_current_launch();
+        app.apply_playback_progress(crate::player::ProgressUpdate {
+            anime_slug: "naruto".into(),
+            episode_number: 5,
+            position_secs: 872,
+            duration_secs: Some(1440),
+            ended_eof: false,
+        });
+
+        let mut term = Terminal::new(TestBackend::new(100, 32)).unwrap();
+
+        // Pantalla Search con Continuar viendo
+        app.screen = Screen::Search;
+        app.toggle_search_focus();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let search_txt: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(search_txt.contains("Continuar viendo"));
+        assert!(search_txt.contains("14:32"));
+
+        // Pantalla Sources con reanudar (14:32)
+        app.set_sources(
+            app.selected_episode.clone().unwrap(),
+            crate::structs::EpisodeSources {
+                sub: vec![crate::structs::VideoSource {
+                    server: "HLS".into(),
+                    url: "https://player.zilla-networks.com/play/0123456789abcdef0123456789abcdef".into(),
+                    audio: crate::structs::AudioType::Sub,
+                    quality: None,
+                }],
+                dub: vec![],
+            },
+        );
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let src_txt: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(src_txt.contains("14:32"));
+        assert!(src_txt.contains("reiniciar 0:00"));
     }
 }

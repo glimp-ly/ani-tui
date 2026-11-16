@@ -24,10 +24,11 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph},
 };
 
-use crate::app::App;
+use crate::app::{App, SearchFocus};
+use crate::storage::format_duration;
 
 /// Paleta de colores de la TUI (estilo cyberpunk/oscuro)
 pub mod palette {
@@ -58,25 +59,37 @@ const LOGO: &str = r"
 ";
 
 /// Renderiza la pantalla de búsqueda completa.
-pub fn render_search(f: &mut Frame, app: &App) {
+pub fn render_search(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     // Fondo
     let bg = Block::default().style(Style::default().bg(palette::BG));
     f.render_widget(bg, area);
 
+    let has_history = !app.history.animes.is_empty();
+    let top_space = if has_history {
+        Constraint::Length(if area.height < 28 { 1 } else { 2 })
+    } else {
+        Constraint::Percentage(15)
+    };
+    let key_space = if has_history {
+        Constraint::Length(2)
+    } else {
+        Constraint::Length(4)
+    };
+
     // Layout principal: centrar verticalmente
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(15), // espacio superior
+            top_space,                  // espacio superior
             Constraint::Length(7),      // logo ASCII
             Constraint::Length(1),      // subtítulo
             Constraint::Length(2),      // separador
             Constraint::Length(3),      // campo de búsqueda
-            Constraint::Length(2),      // separador
-            Constraint::Length(4),      // atajos de teclado
-            Constraint::Min(0),         // espacio inferior
+            Constraint::Length(2),      // estado reproductor
+            key_space,                  // atajos de teclado
+            Constraint::Min(0),         // historial reciente (si existe)
         ])
         .split(area);
 
@@ -97,12 +110,14 @@ pub fn render_search(f: &mut Frame, app: &App) {
     f.render_widget(subtitle, vertical[2]);
 
     // — Campo de búsqueda (centrado horizontalmente) —
+    let side_pct = if area.width < 75 { 5 } else { 15 };
+    let center_pct = 100 - side_pct * 2;
     let h_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(15),
-            Constraint::Percentage(70),
-            Constraint::Percentage(15),
+            Constraint::Percentage(side_pct),
+            Constraint::Percentage(center_pct),
+            Constraint::Percentage(side_pct),
         ])
         .split(vertical[4]);
 
@@ -126,7 +141,20 @@ pub fn render_search(f: &mut Frame, app: &App) {
     f.render_widget(player_status, vertical[5]);
 
     // — Atajos de teclado —
-    render_keybindings_search(f, vertical[6]);
+    render_keybindings_search(f, app, vertical[6]);
+
+    // — Historial reciente (solo si existe y hay espacio) —
+    if has_history && vertical[7].height >= 4 {
+        let hist_h_layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(side_pct),
+                Constraint::Percentage(center_pct),
+                Constraint::Percentage(side_pct),
+            ])
+            .split(vertical[7]);
+        render_recent_history(f, app, hist_h_layout[1]);
+    }
 
     // — Mensaje de error (si hay) —
     if let Some(ref err) = app.error_message {
@@ -174,7 +202,7 @@ fn render_logo(f: &mut Frame, area: Rect) {
 
 /// Renderiza el campo de input de búsqueda con el cursor visible.
 fn render_search_input(f: &mut Frame, app: &App, area: Rect) {
-    let is_active = !app.loading.is_loading();
+    let is_active = !app.loading.is_loading() && app.search_focus == SearchFocus::Input;
 
     let border_color = if is_active {
         palette::BORDER_ACTIVE
@@ -223,20 +251,134 @@ fn render_search_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Renderiza los atajos de teclado de la pantalla de búsqueda.
-fn render_keybindings_search(f: &mut Frame, area: Rect) {
-    let keys = vec![
-        Line::from(vec![
+fn render_keybindings_search(f: &mut Frame, app: &App, area: Rect) {
+    let keys = if app.history.animes.is_empty() {
+        vec![Line::from(vec![
             key_span("Enter"), Span::raw(" buscar   "),
             key_span("Esc"),   Span::raw(" salir   "),
             key_span("?"),     Span::raw(" ayuda"),
-        ]),
-    ];
+        ])]
+    } else if app.search_focus == SearchFocus::History {
+        vec![Line::from(vec![
+            key_span("↑↓"),    Span::raw(" navegar   "),
+            key_span("Enter"), Span::raw(" abrir anime   "),
+            key_span("d"),     Span::raw(" quitar   "),
+            key_span("Tab"),   Span::raw(" buscar   "),
+            key_span("?"),     Span::raw(" ayuda"),
+        ])]
+    } else {
+        vec![Line::from(vec![
+            key_span("Enter"), Span::raw(" buscar   "),
+            key_span("Tab/↓"), Span::raw(" historial   "),
+            key_span("Esc"),   Span::raw(" salir   "),
+            key_span("?"),     Span::raw(" ayuda"),
+        ])]
+    };
 
     let keybindings = Paragraph::new(keys)
         .alignment(Alignment::Center)
         .style(Style::default().fg(palette::TEXT_DIM));
 
     f.render_widget(keybindings, area);
+}
+
+/// Renderiza la lista de animes vistos recientemente.
+fn render_recent_history(f: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.search_focus == SearchFocus::History;
+    let selected_idx = app.history_state.selected();
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" 📜 ", Style::default().fg(palette::ACCENT)),
+            Span::styled(
+                format!("Continuar viendo ({})", app.history.animes.len()),
+                Style::default()
+                    .fg(if focused { palette::TEXT } else { palette::TEXT_DIM })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ]))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if focused {
+            palette::BORDER_ACTIVE
+        } else {
+            palette::BORDER
+        }))
+        .style(Style::default().bg(palette::BG));
+
+    let items: Vec<ListItem> = app
+        .history
+        .animes
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let is_selected = focused && selected_idx == Some(i);
+            let (cat_badge, cat_color) = crate::ui::category_badge(&entry.category);
+
+            let prog_span = match entry.episodes.get(&entry.last_episode) {
+                Some(ep) if ep.completed => Span::styled(
+                    "  ✓ Visto".to_string(),
+                    Style::default().fg(palette::SUCCESS),
+                ),
+                Some(ep) if ep.position_secs >= 5 => {
+                    let pos = format_duration(ep.position_secs);
+                    let label = match ep.duration_secs {
+                        Some(d) if d > 0 => format!("  ⏱ {} / {}", pos, format_duration(d)),
+                        _ => format!("  ⏱ {}", pos),
+                    };
+                    Span::styled(label, Style::default().fg(palette::HIGHLIGHT))
+                }
+                _ => Span::styled("", Style::default()),
+            };
+
+            let prefix = if is_selected { "▶ " } else { "  " };
+            let line = Line::from(vec![
+                Span::styled(
+                    prefix,
+                    Style::default().fg(if is_selected {
+                        palette::HIGHLIGHT
+                    } else {
+                        palette::BG
+                    }),
+                ),
+                Span::styled(
+                    format!("[{}]", cat_badge),
+                    Style::default().fg(cat_color).add_modifier(Modifier::DIM),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    entry.title.clone(),
+                    Style::default()
+                        .fg(if is_selected {
+                            palette::TEXT
+                        } else {
+                            palette::TEXT_DIM
+                        })
+                        .add_modifier(if is_selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::styled(
+                    format!(" · Ep. {}", entry.last_episode),
+                    Style::default().fg(palette::ACCENT),
+                ),
+                prog_span,
+            ]);
+
+            let style = if is_selected {
+                Style::default().bg(Color::Rgb(20, 30, 50))
+            } else {
+                Style::default()
+            };
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(block);
+    f.render_stateful_widget(list, area, &mut app.history_state);
 }
 
 /// Crea un span estilizado para mostrar una tecla de atajo.

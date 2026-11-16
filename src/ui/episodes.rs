@@ -98,8 +98,8 @@ pub fn render_episodes(f: &mut Frame, app: &mut App) {
 
 /// Renderiza la lista de episodios con selección activa.
 fn render_episodes_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    let (anime_title, count_opt, score_opt) = match &app.selected_anime {
-        Some(a) => (a.title.clone(), a.episodes_count, a.score),
+    let (anime_slug, anime_title, count_opt, score_opt) = match &app.selected_anime {
+        Some(a) => (a.slug.clone(), a.title.clone(), a.episodes_count, a.score),
         None => return,
     };
 
@@ -140,6 +140,8 @@ fn render_episodes_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rec
         .border_style(Style::default().fg(palette::BORDER_ACTIVE))
         .style(Style::default().bg(palette::BG));
 
+    let hist_entry = app.history.get_anime(&anime_slug);
+
     // Construir items de la lista
     let items: Vec<ListItem> = app.episodes
         .iter()
@@ -148,6 +150,23 @@ fn render_episodes_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rec
             let is_selected = selected_idx == Some(i);
 
             let prefix = if is_selected { "▶ " } else { "  " };
+            let status_span = match hist_entry.and_then(|h| h.episodes.get(&episode.number)) {
+                Some(prog) if prog.completed => Span::styled(
+                    "  ✓ Visto".to_string(),
+                    Style::default().fg(palette::SUCCESS),
+                ),
+                Some(prog) if prog.position_secs >= 5 => {
+                    let pos = crate::storage::format_duration(prog.position_secs);
+                    let label = match prog.duration_secs {
+                        Some(d) if d > 0 => {
+                            format!("  ⏱ {} / {}", pos, crate::storage::format_duration(d))
+                        }
+                        _ => format!("  ⏱ {}", pos),
+                    };
+                    Span::styled(label, Style::default().fg(palette::HIGHLIGHT))
+                }
+                _ => Span::raw(""),
+            };
 
             let line = Line::from(vec![
                 Span::styled(
@@ -162,6 +181,7 @@ fn render_episodes_list(f: &mut Frame, app: &mut App, area: ratatui::layout::Rec
                         .fg(palette::ACCENT)
                         .add_modifier(if is_selected { Modifier::BOLD } else { Modifier::DIM }),
                 ),
+                status_span,
             ]);
 
             let style = if is_selected {

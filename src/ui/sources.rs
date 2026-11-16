@@ -46,7 +46,7 @@ pub fn render_sources(f: &mut Frame, app: &mut App) {
         .constraints([
             Constraint::Length(3),  // tabs SUB / DUB
             Constraint::Min(6),     // lista de servidores
-            Constraint::Length(3),  // info de la fuente seleccionada
+            Constraint::Length(4),  // info de la fuente seleccionada
             Constraint::Length(2),  // barra de atajos
         ])
         .split(area);
@@ -54,7 +54,7 @@ pub fn render_sources(f: &mut Frame, app: &mut App) {
     render_audio_tabs(f, app, layout[0]);
     render_servers_list(f, app, layout[1]);
     render_source_info(f, app, layout[2]);
-    render_sources_keybindings(f, layout[3]);
+    render_sources_keybindings(f, app, layout[3]);
 
     // Overlays
     if app.loading.is_loading() {
@@ -103,11 +103,20 @@ fn render_audio_tabs(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Style::default().fg(Color::Rgb(50, 50, 60)) // gris muy oscuro si no hay DUB
     };
 
+    let resume_badge = app
+        .selected_episode_resume_secs()
+        .map(|s| format!("  ⏱ {}", crate::storage::format_duration(s)))
+        .unwrap_or_default();
+
     let header = Line::from(vec![
         Span::styled(" 🎬 ", Style::default().fg(palette::ACCENT)),
         Span::styled(
             format!("{} — Ep. {}", anime_title, ep_num),
             Style::default().fg(palette::TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            resume_badge,
+            Style::default().fg(palette::HIGHLIGHT).add_modifier(Modifier::BOLD),
         ),
         Span::raw("   "),
         Span::styled(
@@ -289,17 +298,33 @@ fn render_source_info(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 /// Renderiza la barra de atajos de teclado.
-fn render_sources_keybindings(f: &mut Frame, area: ratatui::layout::Rect) {
+fn render_sources_keybindings(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     use crate::ui::search::key_span;
 
-    let line = Line::from(vec![
-        key_span("↑↓"), Span::raw(" navegar   "),
-        key_span("Enter"), Span::raw(" reproducir   "),
-        key_span("Tab"), Span::raw(" SUB/DUB   "),
-        key_span("Esc"), Span::raw(" volver"),
+    let mut spans = vec![
+        key_span("↑↓"),
+        Span::raw(" navegar   "),
+    ];
+    if let Some(secs) = app.selected_episode_resume_secs() {
+        spans.push(key_span("Enter"));
+        spans.push(Span::raw(format!(
+            " reanudar ({})   ",
+            crate::storage::format_duration(secs)
+        )));
+        spans.push(key_span("r"));
+        spans.push(Span::raw(" reiniciar 0:00   "));
+    } else {
+        spans.push(key_span("Enter"));
+        spans.push(Span::raw(" reproducir   "));
+    }
+    spans.extend([
+        key_span("Tab"),
+        Span::raw(" SUB/DUB   "),
+        key_span("Esc"),
+        Span::raw(" volver"),
     ]);
 
-    let keybindings = Paragraph::new(line)
+    let keybindings = Paragraph::new(Line::from(spans))
         .alignment(Alignment::Center)
         .style(Style::default().fg(palette::TEXT_DIM));
 

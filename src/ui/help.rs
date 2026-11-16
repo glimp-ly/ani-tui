@@ -71,11 +71,13 @@ fn build_help_text() -> Vec<Line<'static>> {
         blank_line(),
 
         // — Búsqueda —
-        section_title("🔍  Búsqueda"),
+        section_title("🔍  Búsqueda e Historial"),
         key_help("/ (barra)", "Ir a la pantalla de búsqueda desde cualquier lugar"),
+        key_help("Tab / ↓", "Alternar foco entre búsqueda e historial reciente"),
+        key_help("d / Supr", "Quitar anime seleccionado del historial"),
         key_help("Backspace", "Borrar el último carácter del campo de búsqueda"),
         key_help("Ctrl+U", "Borrar todo el campo de búsqueda"),
-        key_help("Enter", "Ejecutar la búsqueda con el texto actual"),
+        key_help("Enter", "Buscar anime o abrir anime del historial"),
         blank_line(),
 
         // — Resultados —
@@ -100,7 +102,8 @@ fn build_help_text() -> Vec<Line<'static>> {
         key_help("Tab", "Cambiar entre SUB (subtitulado) y DUB (doblado)"),
         key_help("s", "Cambiar a SUB directamente"),
         key_help("d", "Cambiar a DUB directamente"),
-        key_help("Enter", "Reproducir con mpv → navegador (automático)"),
+        key_help("Enter", "Reproducir con mpv (reanudando minuto) → navegador"),
+        key_help("r", "Reproducir desde 00:00 ignorando minuto guardado"),
         blank_line(),
 
         // — Reproductores —

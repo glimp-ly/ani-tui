@@ -12,6 +12,7 @@
 // - Los eventos de input modifican el estado
 // ============================================================
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use image::DynamicImage;
@@ -23,8 +24,17 @@ use ratatui_image::{
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::cover::{self, CoverCache, CoverEntry};
-use crate::player::PlayerInfo;
+use crate::logger;
+use crate::player::{PlayerInfo, ProgressUpdate};
+use crate::storage::{self, UserConfig, WatchHistory};
 use crate::structs::{Anime, AudioType, Episode, EpisodeSources};
+
+/// Foco activo dentro de la pantalla de inicio (`Search`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchFocus {
+    Input,
+    History,
+}
 
 /// Estado visual de la portada activa para decidir qué dibujar en el panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +198,22 @@ pub struct App {
 
     /// URL pendiente de descarga con debounce para evitar ráfagas al navegar rápido
     pending_cover_fetch: Option<(String, Instant)>,
+
+    // — Configuración e historial persistente —
+    /// Directorio `~/.config/ani-tui/` (si está disponible)
+    pub config_dir: Option<PathBuf>,
+
+    /// Preferencias del usuario leídas de `config.json`
+    pub user_config: UserConfig,
+
+    /// Historial de animes vistos y último segundo reproducido
+    pub history: WatchHistory,
+
+    /// Foco activo en la pantalla de búsqueda (input vs historial)
+    pub search_focus: SearchFocus,
+
+    /// Selección activa dentro de la lista de historial
+    pub history_state: ListState,
 }
 
 impl App {
@@ -229,6 +255,12 @@ impl App {
             active_cover_url: None,
             cover_frame_ready: false,
             pending_cover_fetch: None,
+
+            config_dir: None,
+            user_config: UserConfig::default(),
+            history: WatchHistory::default(),
+            search_focus: SearchFocus::Input,
+            history_state: ListState::default(),
         }
     }
 
@@ -242,6 +274,21 @@ impl App {
         self.cover_protocol = ThreadProtocol::new(resize_tx, None);
         self.cover_frame_ready = false;
         self.sync_cover_selection(true);
+    }
+
+    /// Carga directorio de configuración, ajustes e historial inicial.
+    pub fn init_storage(
+        &mut self,
+        config_dir: Option<PathBuf>,
+        user_config: UserConfig,
+        history: WatchHistory,
+    ) {
+        self.config_dir = config_dir;
+        self.user_config = user_config;
+        self.history = history;
+        if !self.history.animes.is_empty() {
+            self.history_state.select(Some(0));
+        }
     }
 
     // ————————————————————————————————————————
@@ -262,7 +309,11 @@ impl App {
                 self.sync_cover_selection(true);
             }
             Screen::Episodes => {
-                self.screen = Screen::Results;
+                self.screen = if self.search_results.is_empty() {
+                    Screen::Search
+                } else {
+                    Screen::Results
+                };
                 self.sync_cover_selection(true);
             }
             Screen::Results => {
@@ -272,7 +323,9 @@ impl App {
                 self.sync_cover_selection(true);
             }
             Screen::Search => {
-                if self.search_input.is_empty() {
+                if self.search_focus == SearchFocus::History {
+                    self.search_focus = SearchFocus::Input;
+                } else if self.search_input.is_empty() {
                     self.should_quit = true;
                 } else {
                     self.search_input.clear();
@@ -326,6 +379,18 @@ impl App {
     /// Mueve la selección hacia arriba en la lista activa.
     pub fn list_up(&mut self) {
         match self.screen {
+            Screen::Search if self.search_focus == SearchFocus::History => {
+                let len = self.history.animes.len();
+                if len == 0 {
+                    return;
+                }
+                let i = self.history_state.selected().unwrap_or(0);
+                if i == 0 {
+                    self.search_focus = SearchFocus::Input;
+                } else {
+                    self.history_state.select(Some(i - 1));
+                }
+            }
             Screen::Results => {
                 let len = self.search_results.len();
                 if len == 0 {
@@ -361,6 +426,14 @@ impl App {
     /// Mueve la selección hacia abajo en la lista activa.
     pub fn list_down(&mut self) {
         match self.screen {
+            Screen::Search if self.search_focus == SearchFocus::History => {
+                let len = self.history.animes.len();
+                if len == 0 {
+                    return;
+                }
+                let i = self.history_state.selected().unwrap_or(0);
+                self.history_state.select(Some((i + 1) % len));
+            }
             Screen::Results => {
                 let len = self.search_results.len();
                 if len == 0 { return; }
@@ -417,6 +490,7 @@ impl App {
         if let Some(existing) = self.search_results.iter_mut().find(|a| a.slug == anime.slug) {
             *existing = anime.clone();
         }
+        let slug = anime.slug.clone();
         self.selected_anime = Some(anime);
         self.episodes = episodes;
         self.loading = LoadingState::Idle;
@@ -424,7 +498,13 @@ impl App {
         self.info_message = None;
 
         if !self.episodes.is_empty() {
-            self.episodes_state.select(Some(0));
+            let ep_numbers: Vec<u32> = self.episodes.iter().map(|e| e.number).collect();
+            let initial_idx = self
+                .history
+                .preferred_episode(&slug, &ep_numbers)
+                .and_then(|target| self.episodes.iter().position(|e| e.number == target))
+                .unwrap_or(0);
+            self.episodes_state.select(Some(initial_idx));
             self.screen = Screen::Episodes;
             self.sync_cover_selection(true);
         }
@@ -630,6 +710,107 @@ impl App {
                 ProtocolType::Sixel | ProtocolType::Iterm2
             )
     }
+
+    // ————————————————————————————————————————
+    // Historial de vistos y reanudación
+    // ————————————————————————————————————————
+
+    /// Alterna el foco entre la caja de búsqueda y el historial reciente.
+    pub fn toggle_search_focus(&mut self) {
+        if self.history.animes.is_empty() {
+            self.search_focus = SearchFocus::Input;
+            return;
+        }
+        self.search_focus = match self.search_focus {
+            SearchFocus::Input => {
+                if self.history_state.selected().is_none() {
+                    self.history_state.select(Some(0));
+                }
+                SearchFocus::History
+            }
+            SearchFocus::History => SearchFocus::Input,
+        };
+    }
+
+    /// Devuelve el anime seleccionado en el historial reciente para cargar sus episodios.
+    pub fn selected_history_anime(&self) -> Option<Anime> {
+        let idx = self.history_state.selected()?;
+        let entry = self.history.animes.get(idx)?;
+        Some(Anime {
+            id: String::new(),
+            title: entry.title.clone(),
+            slug: entry.slug.clone(),
+            synopsis: String::new(),
+            category: entry.category.clone(),
+            mal_id: None,
+            episodes_count: None,
+            score: None,
+            cover_url: entry.cover_url.clone(),
+        })
+    }
+
+    /// Elimina el anime seleccionado del historial y guarda el cambio en disco.
+    pub fn remove_selected_history(&mut self) {
+        let Some(idx) = self.history_state.selected() else {
+            return;
+        };
+        let Some(slug) = self.history.animes.get(idx).map(|a| a.slug.clone()) else {
+            return;
+        };
+        if self.history.remove_anime(&slug) {
+            if self.history.animes.is_empty() {
+                self.history_state.select(None);
+                self.search_focus = SearchFocus::Input;
+            } else {
+                self.history_state
+                    .select(Some(idx.min(self.history.animes.len() - 1)));
+            }
+            self.persist_history();
+        }
+    }
+
+    /// Segundo desde el cual reanudar el episodio seleccionado (si aplica).
+    pub fn selected_episode_resume_secs(&self) -> Option<u64> {
+        let anime = self.selected_anime.as_ref()?;
+        let ep = self.selected_episode.as_ref()?;
+        self.history
+            .resume_seconds(&anime.slug, ep.number, &self.user_config)
+    }
+
+    /// Registra la apertura del episodio actual en historial y guarda en disco.
+    pub fn record_current_launch(&mut self) {
+        let (Some(ref anime), Some(ref ep)) = (&self.selected_anime, &self.selected_episode) else {
+            return;
+        };
+        self.history
+            .record_launch(anime, ep.number, self.user_config.max_history_animes);
+        self.history_state.select(Some(0));
+        self.persist_history();
+    }
+
+    /// Actualiza progreso recibido desde `mpv` y persiste si hubo cambio relevante.
+    pub fn apply_playback_progress(&mut self, update: ProgressUpdate) {
+        let changed = self.history.record_progress(
+            &update.anime_slug,
+            update.episode_number,
+            update.position_secs,
+            update.duration_secs,
+            update.ended_eof,
+            &self.user_config,
+        );
+        if changed {
+            self.persist_history();
+        }
+    }
+
+    fn persist_history(&self) {
+        let Some(ref dir) = self.config_dir else {
+            return;
+        };
+        if let Err(e) = storage::save_history(dir, &self.history) {
+            logger::log_warn("storage", &format!("no se pudo guardar historial: {}", e));
+        }
+    }
 }
 
 impl Default for App {
@@ -738,5 +919,64 @@ mod tests {
             app.cover_state(app.active_cover_url.as_deref()),
             CoverDisplayState::Loading
         );
+    }
+
+    #[test]
+    fn history_resume_selects_episode_and_returns_to_search() {
+        let dir = std::env::temp_dir().join(format!("ani_tui_app_hist_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (cfg, hist) = storage::load_from_dir(&dir);
+        let mut app = App::new();
+        app.init_storage(Some(dir.clone()), cfg, hist);
+
+        let naruto = Anime {
+            id: "190".into(),
+            title: "Naruto".into(),
+            slug: "naruto".into(),
+            synopsis: "Ninja".into(),
+            category: AnimeCategory::TvAnime,
+            mal_id: None,
+            episodes_count: Some(10),
+            score: Some(8.2),
+            cover_url: Some("https://cdn.animeav1.com/covers/190.jpg".into()),
+        };
+
+        let ep5 = Episode {
+            id: 50,
+            number: 5,
+            anime_slug: "naruto".into(),
+        };
+        let eps = vec![
+            Episode { id: 10, number: 1, anime_slug: "naruto".into() },
+            ep5.clone(),
+            Episode { id: 60, number: 6, anime_slug: "naruto".into() },
+        ];
+
+        app.set_episodes(naruto.clone(), eps.clone());
+        app.selected_episode = Some(ep5.clone());
+        app.record_current_launch();
+        app.apply_playback_progress(ProgressUpdate {
+            anime_slug: "naruto".into(),
+            episode_number: 5,
+            position_secs: 615,
+            duration_secs: Some(1440),
+            ended_eof: false,
+        });
+        assert_eq!(app.selected_episode_resume_secs(), Some(615));
+
+        // Al volver desde historial vacío de resultados regresa a Search
+        app.go_back();
+        assert_eq!(app.screen, Screen::Search);
+
+        // Reabrir desde una nueva sesión lee ~/.config/... equivalente y preselecciona Ep. 5
+        let (cfg2, hist2) = storage::load_from_dir(&dir);
+        let mut app2 = App::new();
+        app2.init_storage(Some(dir.clone()), cfg2, hist2);
+        let from_hist = app2.selected_history_anime().unwrap();
+        app2.set_episodes(from_hist, eps);
+        assert_eq!(app2.episodes_state.selected(), Some(1));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -19,6 +19,7 @@ mod player;
 mod resolver;
 mod scraper;
 mod security;
+mod storage;
 mod structs;
 mod ui;
 
@@ -82,6 +83,9 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Asegura siempre la existencia de ~/.config/ani-tui/ al iniciar la aplicación
+    let _ = storage::ensure_config_dir();
 
     // — Inicializar logger global al arrancar (aplica a todos los subcomandos) —
     if let Some(log_path) = logger::get_log_path() {
@@ -172,8 +176,21 @@ async fn run_tui() -> Result<()> {
         }
     });
 
+    // — Worker en background para recibir progreso de reproducción desde mpv —
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<player::ProgressUpdate>();
+    let tx_progress = tx.clone();
+    tokio::spawn(async move {
+        while let Some(update) = progress_rx.recv().await {
+            let _ = tx_progress.send(AppEvent::PlaybackProgress(update));
+        }
+    });
+
+    // — Cargar configuración e historial de ~/.config/ani-tui/ —
+    let (config_dir, user_config, history) = storage::init_and_load();
+
     // — Inicializar estado de la aplicación —
     let mut app = App::new();
+    app.init_storage(config_dir, user_config, history);
     app.init_cover_worker(picker, resize_tx);
 
     // — Pantalla anterior para el overlay de ayuda —
@@ -238,7 +255,7 @@ async fn run_tui() -> Result<()> {
                     ).await,
 
                     Screen::Sources => handle_sources_input(
-                        &mut app, key.code, &tx
+                        &mut app, key.code, &tx, &progress_tx
                     ),
 
                     Screen::Help => {
@@ -299,6 +316,8 @@ enum AppEvent {
     },
     /// Resultado de lanzar reproducción en mpv o navegador
     PlayFinished(player::PlayResult),
+    /// Progreso reportado en vivo por `mpv` mediante IPC
+    PlaybackProgress(player::ProgressUpdate),
     /// Portada descargada y decodificada (None si falló)
     CoverLoaded {
         url: String,
@@ -348,7 +367,7 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
         AppEvent::PlayFinished(result) => {
             app.loading = app::LoadingState::Idle;
             match result {
-                player::PlayResult::LaunchedMpv { ref url } => {
+                player::PlayResult::LaunchedMpv { ref url, .. } => {
                     logger::log_info(
                         "tui",
                         &format!("mpv lanzado: {}", structs::truncate_chars(url, 50)),
@@ -369,6 +388,9 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
                     app.set_error(format!("Error al reproducir: {}", e));
                 }
             }
+        }
+        AppEvent::PlaybackProgress(update) => {
+            app.apply_playback_progress(update);
         }
         AppEvent::CoverLoaded { url, image } => {
             app.handle_cover_loaded(url, image);
@@ -393,10 +415,35 @@ async fn handle_search_input(
     modifiers: KeyModifiers,
     tx: &UnboundedSender<AppEvent>,
 ) {
+    if app.search_focus == app::SearchFocus::History {
+        match code {
+            KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('/') => {
+                app.search_focus = app::SearchFocus::Input;
+            }
+            KeyCode::Up | KeyCode::Char('k') => app.list_up(),
+            KeyCode::Down | KeyCode::Char('j') => app.list_down(),
+            KeyCode::Char('d') | KeyCode::Delete => app.remove_selected_history(),
+            KeyCode::Char('q') if app.search_input.is_empty() => {
+                app.should_quit = true;
+            }
+            KeyCode::Enter => {
+                if let Some(anime) = app.selected_history_anime() {
+                    trigger_load_episodes(app, tx, anime).await;
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match code {
         // Salir
         KeyCode::Esc | KeyCode::Char('q') if app.search_input.is_empty() => {
             app.should_quit = true;
+        }
+        // Cambiar foco al historial reciente
+        KeyCode::Tab | KeyCode::BackTab | KeyCode::Down if !app.history.animes.is_empty() => {
+            app.toggle_search_focus();
         }
         // Borrar campo completo con Ctrl+U
         KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -581,6 +628,7 @@ fn handle_sources_input(
     app: &mut App,
     code: KeyCode,
     tx: &UnboundedSender<AppEvent>,
+    progress_tx: &UnboundedSender<player::ProgressUpdate>,
 ) {
     match code {
         KeyCode::Esc => app.go_back(),
@@ -602,26 +650,58 @@ fn handle_sources_input(
                 app.toggle_audio();
             }
         }
-        // Reproducir la fuente seleccionada sin bloquear el event loop de la TUI
-        KeyCode::Enter => {
-            let sources = app.sources.get(&app.selected_audio);
-            if sources.is_empty() {
-                let _ = tx.send(AppEvent::PlayFinished(player::PlayResult::NoSources));
-                return;
-            }
-            if let Some(idx) = app.sources_state.selected() {
-                if let Some(source) = sources.get(idx).cloned() {
-                    app.loading = app::LoadingState::LaunchingPlayer;
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        let result = player::play_source_async(&source).await;
-                        let _ = tx.send(AppEvent::PlayFinished(result));
-                    });
-                }
-            }
-        }
+        // Reproducir desde el minuto guardado (Enter) o desde 00:00 (r)
+        KeyCode::Enter => launch_selected_source(app, tx, progress_tx, true),
+        KeyCode::Char('r') => launch_selected_source(app, tx, progress_tx, false),
         _ => {}
     }
+}
+
+fn launch_selected_source(
+    app: &mut App,
+    tx: &UnboundedSender<AppEvent>,
+    progress_tx: &UnboundedSender<player::ProgressUpdate>,
+    resume: bool,
+) {
+    let sources = app.sources.get(&app.selected_audio);
+    if sources.is_empty() {
+        let _ = tx.send(AppEvent::PlayFinished(player::PlayResult::NoSources));
+        return;
+    }
+
+    let Some(idx) = app.sources_state.selected() else {
+        return;
+    };
+    let Some(source) = sources.get(idx).cloned() else {
+        return;
+    };
+
+    let start_secs = if resume {
+        app.selected_episode_resume_secs()
+    } else {
+        None
+    };
+
+    let (anime_slug, episode_number) = match (&app.selected_anime, &app.selected_episode) {
+        (Some(anime), Some(ep)) => (anime.slug.clone(), ep.number),
+        _ => return,
+    };
+
+    app.record_current_launch();
+    app.loading = app::LoadingState::LaunchingPlayer;
+
+    let tx = tx.clone();
+    let options = player::PlayOptions {
+        anime_slug,
+        episode_number,
+        start_secs,
+        progress_tx: Some(progress_tx.clone()),
+    };
+
+    tokio::spawn(async move {
+        let result = player::play_source_async(&source, options).await;
+        let _ = tx.send(AppEvent::PlayFinished(result));
+    });
 }
 
 // ————————————————————————————————————————————————
